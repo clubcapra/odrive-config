@@ -10,6 +10,7 @@ from can_simple_utils import CanSimpleNode, REBOOT_ACTION_SAVE # if this import 
 
 endpoint_dir = "flat_endpoints/"
 track_config_file = "configs/track.json"
+# tracks_node_ids = [21, 22, 23, 24]
 tracks_node_ids = [21, 22, 23, 24]
 
 _OPCODE_READ = 0x00
@@ -104,7 +105,7 @@ async def restore_config(odrv: EndpointAccess, config: dict):
 async def main():
     parser = argparse.ArgumentParser(description='Script to configure ODrive over CAN bus.')
     parser.add_argument('-i', '--interface', type=str, default='socketcan', help='Interface type (e.g., socketcan, slcan). Default is socketcan.')
-    parser.add_argument('-c', '--channel', type=str, required=True, help='Channel/path/interface name of the device (e.g., can0, /dev/tty.usbmodem11201).')
+    parser.add_argument('-c', '--channel', type=str, default='can0', help='Channel/path/interface name of the device (e.g., can0, /dev/tty.usbmodem11201).')
     parser.add_argument('-b', '--bitrate', type=int, default=250000, help='Bitrate for CAN bus. Default is 250000.')
     parser.add_argument("--save-config", action='store_true', help="Save the configuration to NVM and reboot ODrive.")
     args = parser.parse_args()
@@ -123,7 +124,7 @@ async def main():
                 print("checking version...")
                 if await odrv.version_check():
                     await restore_config(odrv, track_config_list)
-
+                    print()
                     if args.save_config:
                         print(f"saving configuration...")
                         node.reboot_msg(REBOOT_ACTION_SAVE)

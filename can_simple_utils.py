@@ -57,3 +57,10 @@ class CanSimpleNode():
             data=struct.pack('<I', state),
             is_extended_id=False
         ))
+
+    def set_velocity(self, vel:float):
+        self.bus.send(can.Message(
+            arbitration_id=(self.node_id << 5 | 0x0d), # 0x0d: Set_Input_Vel
+            data=struct.pack('<ff', vel, 0.0), # 1.0: velocity, 0.0: torque feedforward
+            is_extended_id=False
+        ))
