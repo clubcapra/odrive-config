@@ -10,6 +10,7 @@ from can_simple_utils import CanSimpleNode, REBOOT_ACTION_SAVE # if this import 
 
 endpoint_dir = "flat_endpoints/"
 track_config_file = "configs/track.json"
+
 # tracks_node_ids = [21, 22, 23, 24]
 tracks_node_ids = [21, 22, 23, 24]
 
