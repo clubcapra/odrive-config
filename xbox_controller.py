@@ -35,7 +35,8 @@ class XboxController(object):
     MAX_TRIG_VAL = math.pow(2, 8)
     MAX_JOY_VAL = math.pow(2, 15)
 
-    def __init__(self):
+    def __init__(self, deadzone = 0.05):
+        self._deadzone = 0.05
         """
         Initializes the XboxController object and starts the monitoring thread.
         """
@@ -59,6 +60,7 @@ class XboxController(object):
         self.RightDPad = 0
         self.UpDPad = 0
         self.DownDPad = 0
+        self.Connected = False
 
         self._monitor_thread = threading.Thread(target=self._monitor_controller, args=())
         self._monitor_thread.daemon = True
@@ -71,15 +73,16 @@ class XboxController(object):
         try:
             while True:
                 events = get_gamepad()
+                self.Connected = True
                 for event in events:
                     if event.code == 'ABS_Y':
-                        self.LeftJoystickY = event.state / XboxController.MAX_JOY_VAL
+                        self.LeftJoystickY = self._apply_deadzone(event.state * -1 / XboxController.MAX_JOY_VAL)
                     elif event.code == 'ABS_X':
-                        self.LeftJoystickX = event.state / XboxController.MAX_JOY_VAL
+                        self.LeftJoystickX = self._apply_deadzone(event.state * -1 / XboxController.MAX_JOY_VAL)
                     elif event.code == 'ABS_RY':
-                        self.RightJoystickY = event.state / XboxController.MAX_JOY_VAL
+                        self.RightJoystickY = self._apply_deadzone(event.state * -1 / XboxController.MAX_JOY_VAL)
                     elif event.code == 'ABS_RX':
-                        self.RightJoystickX = event.state / XboxController.MAX_JOY_VAL
+                        self.RightJoystickX = self._apply_deadzone(event.state * -1 / XboxController.MAX_JOY_VAL)
                     elif event.code == 'ABS_Z':
                         self.LeftTrigger = event.state / XboxController.MAX_TRIG_VAL
                     elif event.code == 'ABS_RZ':
@@ -122,4 +125,14 @@ class XboxController(object):
                             self.DownDPad = event.state
         except UnpluggedError:
             print("No gamepad found. Exiting the controller monitoring thread.")
+            self.Connected = False
             # You can add additional handling for this case, such as setting all values to 0 or terminating the program.
+        except OSError:
+            print("Controller disconnected. Exiting the controller monitor thread.")
+            self.Connected = False
+
+    def _apply_deadzone(self, value):
+        if value > 0:
+            return max(0, value - self._deadzone)
+        else:
+            return min(0, value + self._deadzone)

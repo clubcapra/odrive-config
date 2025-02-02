@@ -20,6 +20,7 @@ import sys
 import termios
 
 from xbox_controller import XboxController
+from time import sleep
 
 CLOSED_LOOP_CONTROL=8
 IDLE=1
@@ -30,6 +31,20 @@ node22 = True
 node23 = True
 node24 = True
 
+def tank_drive(x_axis, y_axis):
+    # Tank drive model:
+    # Left speed = y + x (for forward/reverse and turning)
+    # Right speed = y - x (for forward/reverse and turning)
+    
+    # Ensure values stay within the -1 to 1 range.
+    left_speed = y_axis + x_axis  # Forward/backward + turning
+    right_speed = y_axis - x_axis  # Forward/backward - turning
+    
+    # Clamp the speeds to the range [-1, 1] to prevent overflow.
+    left_speed = max(-1, min(1, left_speed))
+    right_speed = max(-1, min(1, right_speed))
+    
+    return left_speed, right_speed
 
 def setOpen():
     if (node21) : can21.set_state_msg(CLOSED_LOOP_CONTROL)
@@ -128,67 +143,60 @@ tty.setcbreak(sys.stdin)
 x = 0
 
 xbox_controller = XboxController()
+isOpen = False
+isClearError = False
+while True: # ESC
+    sleep(0.01)
+    speed = max(xbox_controller.RightTrigger * max_speed - 0.1, 0)
 
-while x != chr(27): # ESC
-    key=sys.stdin.read(1)[0]
-    askToOpen = False
-
-    print("real", key)
-    if xbox_controller.A == 1 :
-        askToOpen = True
+    if xbox_controller.A == 1 and isOpen == False:
+        setOpen()
+        isOpen = True
         # speed = min(speed, 10)
-        key = last_key
 
-    if xbox_controller.A == 0 :
+    if (xbox_controller.A == 0 or xbox_controller.Connected == False) and isOpen == True:
         setIdle()
-        key = last_key
-
-    elif xbox_controller.A == 1 :
-        askToOpen = True
-        # speed = min(speed, 10)
-        key = last_key
-
-    elif xbox_controller.LeftBumper == 1 :
-        speed = max(speed - step, min_speed)
-        key = last_key
-
-    elif xbox_controller.RightBumper == 1:
-        speed = min(speed + step, max_speed)
-        key = last_key
-
-    elif key == " ":
-        speed = 0
-        key = last_key
+        isOpen = False
     
-    elif key == "e":
+    if xbox_controller.B == 1 and isClearError == False:
         clearErr()
-        key = last_key
+        isClearError = True
 
-    last_key = key
+    if xbox_controller.B == 0 and isClearError == True:
+        isClearError = False
 
     if xbox_controller.UpDPad == 1:
         runRight(speed)
         runLeft(speed)
         print("front  ", speed)
     
-    if xbox_controller.DownDPad == 1:
+    elif xbox_controller.DownDPad == 1:
         runRight(-speed)
         runLeft(-speed)
         print("back   ", speed)
 
-    if xbox_controller.LeftDPad == 1:
+    elif xbox_controller.LeftDPad == 1:
         runRight(speed)
         runLeft(-speed)
         print("left   ", speed)
 
-    if xbox_controller.RightDPad == 1:
+    elif xbox_controller.RightDPad == 1:
         runRight(-speed)
         runLeft(speed)
         print("right  ", speed)
+    else:
+        # runRight(0)
+        # runLeft(0)
+        
+        right, left = tank_drive(xbox_controller.LeftJoystickX, xbox_controller.LeftJoystickY)
+        if __debug__:
+            print('%.2f' % xbox_controller.LeftJoystickX, '%.2f' % xbox_controller.LeftJoystickY, '%.2f' % left, '%.2f' % right)
+        runRight(right * max_speed)
+        runLeft(left * max_speed)
 
-    if askToOpen:
-        setOpen()
-    print(key)
+    
+
+
     
 
 termios.tcsetattr(sys.stdin, termios.TCSADRAIN, orig_settings)
