@@ -1,11 +1,10 @@
-from inputs import get_gamepad, UnpluggedError
 import math
 import threading
-
+import evdev
 
 class XboxController(object):
     """
-    XboxController class for interfacing with an Xbox controller.
+    XboxController class for interfacing with an Xbox controller using evdev.
 
     Attributes:
     - MAX_TRIG_VAL: Maximum trigger value.
@@ -32,14 +31,28 @@ class XboxController(object):
     - DownDPad: State of the down direction pad button.
     """
 
-    MAX_TRIG_VAL = math.pow(2, 8)
-    MAX_JOY_VAL = math.pow(2, 15)
+    MAX_TRIG_VAL = 1_023
+    MAX_JOY_VAL = 32_768
 
-    def __init__(self, deadzone = 0.05):
-        self._deadzone = 0.05
+    def __init__(self, deadzone=0.1):
+        self._deadzone = deadzone
         """
         Initializes the XboxController object and starts the monitoring thread.
         """
+        devices = [evdev.InputDevice(path) for path in evdev.list_devices()]
+        self.device_path = ""
+        for device in devices:
+            if device.name == "Xbox Wireless Controller":
+                self.device_path = device.path
+                break
+
+        if self.device_path == "":
+            print("Controller disconnected. Exiting the controller monitor thread.")
+            self.Connected = False
+            return
+
+        self.device = evdev.InputDevice(self.device_path)
+
         self.LeftJoystickY = 0
         self.LeftJoystickX = 0
         self.RightJoystickY = 0
@@ -71,68 +84,62 @@ class XboxController(object):
         Monitors the Xbox controller for input events and updates the attributes accordingly.
         """
         try:
-            while True:
-                events = get_gamepad()
-                self.Connected = True
-                for event in events:
-                    if event.code == 'ABS_Y':
-                        self.LeftJoystickY = self._apply_deadzone(event.state * -1 / XboxController.MAX_JOY_VAL)
-                    elif event.code == 'ABS_X':
-                        self.LeftJoystickX = self._apply_deadzone(event.state * -1 / XboxController.MAX_JOY_VAL)
-                    elif event.code == 'ABS_RY':
-                        self.RightJoystickY = self._apply_deadzone(event.state * -1 / XboxController.MAX_JOY_VAL)
-                    elif event.code == 'ABS_RX':
-                        self.RightJoystickX = self._apply_deadzone(event.state * -1 / XboxController.MAX_JOY_VAL)
-                    elif event.code == 'ABS_Z':
-                        self.LeftTrigger = event.state / XboxController.MAX_TRIG_VAL
-                    elif event.code == 'ABS_RZ':
-                        self.RightTrigger = event.state / XboxController.MAX_TRIG_VAL
-                    elif event.code == 'BTN_TL':
-                        self.LeftBumper = event.state
-                    elif event.code == 'BTN_TR':
-                        self.RightBumper = event.state
-                    elif event.code == 'BTN_SOUTH':
-                        self.A = event.state
-                    elif event.code == 'BTN_NORTH':
-                        self.Y = event.state
-                    elif event.code == 'BTN_WEST':
-                        self.X = event.state
-                    elif event.code == 'BTN_EAST':
-                        self.B = event.state
-                    elif event.code == 'BTN_THUMBL':
-                        self.LeftThumb = event.state
-                    elif event.code == 'BTN_THUMBR':
-                        self.RightThumb = event.state
-                    elif event.code == 'BTN_SELECT':
-                        self.Back = event.state
-                    elif event.code == 'BTN_START':
-                        self.Start = event.state
-                    elif event.code == 'ABS_HAT0X':
-                        if event.state == 1:
+            self.Connected = True
+            for event in self.device.read_loop():
+                if event.type == evdev.ecodes.EV_ABS:
+                    if event.code == evdev.ecodes.ABS_Y:
+                        self.LeftJoystickY = self._apply_deadzone((-event.value + XboxController.MAX_JOY_VAL) / XboxController.MAX_JOY_VAL)
+                    elif event.code == evdev.ecodes.ABS_X:
+                        self.LeftJoystickX = self._apply_deadzone((event.value - XboxController.MAX_JOY_VAL) / XboxController.MAX_JOY_VAL)
+                    elif event.code == evdev.ecodes.ABS_RZ:
+                        self.RightJoystickY = self._apply_deadzone((-event.value + XboxController.MAX_JOY_VAL) / XboxController.MAX_JOY_VAL)
+                    elif event.code == evdev.ecodes.ABS_Z:
+                        self.RightJoystickX = self._apply_deadzone((event.value - XboxController.MAX_JOY_VAL) / XboxController.MAX_JOY_VAL)
+                    elif event.code == evdev.ecodes.ABS_BRAKE:
+                        self.LeftTrigger = event.value / XboxController.MAX_TRIG_VAL
+                    elif event.code == evdev.ecodes.ABS_GAS:
+                        self.RightTrigger = event.value / XboxController.MAX_TRIG_VAL
+                    elif event.code == evdev.ecodes.ABS_HAT0X:
+                        if event.value == 1:
                             self.RightDPad = 1
-                        elif event.state == -1:
+                        elif event.value == -1:
                             self.LeftDPad = 1
-                        elif event.state == 0:
-                            self.RightDPad = event.state
-                            self.LeftDPad = event.state
-                    elif event.code == 'ABS_HAT0Y':
-                        if event.state == 1:
+                        elif event.value == 0:
+                            self.RightDPad = self.LeftDPad = 0
+                    elif event.code == evdev.ecodes.ABS_HAT0Y:
+                        if event.value == 1:
                             self.DownDPad = 1
-                        elif event.state == -1:
+                        elif event.value == -1:
                             self.UpDPad = 1
-                        elif event.state == 0:
-                            self.UpDPad = event.state
-                            self.DownDPad = event.state
-        except UnpluggedError:
-            print("No gamepad found. Exiting the controller monitoring thread.")
-            self.Connected = False
-            # You can add additional handling for this case, such as setting all values to 0 or terminating the program.
+                        elif event.value == 0:
+                            self.UpDPad = self.DownDPad = 0
+                elif event.type == evdev.ecodes.EV_KEY:
+                    if event.code == evdev.ecodes.BTN_TL:
+                        self.LeftBumper = event.value
+                    elif event.code == evdev.ecodes.BTN_TR:
+                        self.RightBumper = event.value
+                    elif event.code == evdev.ecodes.BTN_SOUTH:
+                        self.A = event.value
+                    elif event.code == evdev.ecodes.BTN_NORTH:
+                        self.Y = event.value
+                    elif event.code == evdev.ecodes.BTN_WEST:
+                        self.X = event.value
+                    elif event.code == evdev.ecodes.BTN_EAST:
+                        self.B = event.value
+                    elif event.code == evdev.ecodes.BTN_THUMBL:
+                        self.LeftThumb = event.value
+                    elif event.code == evdev.ecodes.BTN_THUMBR:
+                        self.RightThumb = event.value
+                    elif event.code == evdev.ecodes.BTN_SELECT:
+                        self.Back = event.value
+                    elif event.code == evdev.ecodes.BTN_START:
+                        self.Start = event.value
         except OSError:
             print("Controller disconnected. Exiting the controller monitor thread.")
             self.Connected = False
 
     def _apply_deadzone(self, value):
         if value > 0:
-            return max(0, value - self._deadzone)
+            return max(0, value - self._deadzone) / (1.0 - self._deadzone)
         else:
-            return min(0, value + self._deadzone)
+            return min(0, value + self._deadzone) / (1.0 - self._deadzone)

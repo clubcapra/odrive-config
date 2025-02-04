@@ -3,6 +3,8 @@ import asyncio
 import can
 import struct
 
+from odrive_error_codes import get_error_description
+
 ADDRESS_CMD = 0x06
 SET_AXIS_STATE_CMD = 0x07
 REBOOT_CMD = 0x16
@@ -17,6 +19,7 @@ class CanSimpleNode():
         self.bus = bus
         self.node_id = node_id
         self.reader = can.AsyncBufferedReader()
+        self.connected = False
 
     def __enter__(self):
         self.notifier = can.Notifier(self.bus, [self.reader], loop=asyncio.get_running_loop())
@@ -51,12 +54,31 @@ class CanSimpleNode():
             is_extended_id=False
         ))
 
+    def getErrorDescription(self, error_code):
+        error_description = get_error_description(error_code)
+        print(f"CAN {self.node_id} Error Code: {error_code} - {error_description}")
+        self.clear_errors_msg()
+
     def set_state_msg(self, state: int):
         self.bus.send(can.Message(
             arbitration_id=(self.node_id << 5 | SET_AXIS_STATE_CMD),
             data=struct.pack('<I', state),
             is_extended_id=False
         ))
+        self.connected = False
+    
+    def wait_state(self, stateWaited: int, msg):
+        if self.connected:
+            return True
+        if msg.arbitration_id == (self.node_id << 5 | 0x01):  # Heartbeat
+            error, state, result, traj_done = struct.unpack('<IBBB', bytes(msg.data[:7]))
+            if state == stateWaited:
+                if error != 0:
+                    self.getErrorDescription(error)  # Check for error codes
+                self.connected = True
+                return True
+        return False
+
 
     def set_velocity(self, vel:float):
         self.bus.send(can.Message(
