@@ -1,0 +1,5 @@
+{
+  "axis0.config.load_encoder": 10,
+  "axis0.config.commutation_encoder": 10,
+  "rs485_encoder_group0.config.mode": 2
+}

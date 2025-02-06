@@ -9,13 +9,17 @@ import struct
 from can_simple_utils import CanSimpleNode, REBOOT_ACTION_SAVE # if this import fails, make sure you copy the whole folder from the git repository
 
 endpoint_dir = "flat_endpoints/"
-track_config_file = "config/track.json"
-
-IDLE=1
-CALIBRATION=3
+track_config_file = "config/_track.json"
+flipper_config_file = "config/_flipper.json"
+config_files = ["config/can.json", "config/encoder.json", "config/power_source.json"]
 
 # tracks_node_ids = [21, 22, 23, 24]
 tracks_node_ids = [11, 22, 23, 13]
+# flipper_node_ids = [11, 12, 13, 14]
+flipper_node_ids = []
+
+IDLE=1
+CALIBRATION=3
 
 _OPCODE_READ = 0x00
 _OPCODE_WRITE = 0x01
@@ -106,6 +110,26 @@ async def restore_config(odrv: EndpointAccess, config: dict):
         print(f"  {k} = {v}")
         await odrv.write_and_verify(k, v)
 
+async def configure(node_id, bus, config, save_config, calibrate):
+    with CanSimpleNode(bus=bus, node_id=node_id) as node:
+        odrv = EndpointAccess(node=node, endpoint_data={})
+        print("Node id:", node_id)
+        print("checking version...")
+        if await odrv.version_check():
+            await restore_config(odrv, config)
+            print()
+            if save_config:
+                print(f"saving configuration...")
+                node.reboot_msg(REBOOT_ACTION_SAVE)
+        if calibrate:
+            odrv.node.set_state_msg(CALIBRATION)
+            print(f"calibrating...")
+            
+            for msg in bus:
+                if odrv.node.wait_state(IDLE, msg):
+                    break
+            node.reboot_msg(REBOOT_ACTION_SAVE)
+
 async def main():
     parser = argparse.ArgumentParser(description='Script to configure ODrive over CAN bus.')
     parser.add_argument('-i', '--interface', type=str, default='socketcan', help='Interface type (e.g., socketcan, slcan). Default is socketcan.')
@@ -114,34 +138,32 @@ async def main():
     parser.add_argument("--save-config", action='store_true', help="Save the configuration to NVM and reboot ODrive.")
     parser.add_argument("--calibrate", action='store_true', help="Calibrate the ODrive and save the configuration")
     args = parser.parse_args()
+    
+    config_list = {}
+    track_config_list = {}
+    flipper_config_list = {}
+
+    for file in config_files:
+        with open(file, 'r') as f:
+            config_list.update(json.load(f))
 
     with open(track_config_file, 'r') as f:
-        track_config_list = json.load(f)
+        track_config_list.update(json.load(f))
+    track_config_list.update(config_list)
+
+    with open(flipper_config_file, 'r') as f:
+        flipper_config_list.update(json.load(f))
+    flipper_config_list.update(config_list)
 
     print("opening CAN bus...")
     with can.interface.Bus(args.channel, bustype=args.interface, bitrate=args.bitrate) as bus:
         #reader = can.AsyncBufferedReader()
         #notifier = can.Notifier(bus, [reader], loop=asyncio.get_running_loop())
         for node_id in tracks_node_ids:
-            with CanSimpleNode(bus=bus, node_id=node_id) as node:
-                odrv = EndpointAccess(node=node, endpoint_data={})
-                print("Node id:", node_id)
-                print("checking version...")
-                if await odrv.version_check():
-                    await restore_config(odrv, track_config_list)
-                    print()
-                    if args.save_config:
-                        print(f"saving configuration...")
-                        node.reboot_msg(REBOOT_ACTION_SAVE)
-                if args.calibrate:
-                    odrv.node.set_state_msg(CALIBRATION)
-                    print(f"calibrating...")
-                    
-                    for msg in bus:
-                        if odrv.node.wait_state(IDLE, msg):
-                            break
-                    node.reboot_msg(REBOOT_ACTION_SAVE)
+            await configure(node_id, bus, track_config_list, args.save_config, args.calibrate)
 
+        for node_id in flipper_node_ids:
+            await configure(node_id, bus, flipper_config_list, args.save_config, args.calibrate)
 
         await asyncio.sleep(0.1) # needed for last message to get through on SLCAN backend
 

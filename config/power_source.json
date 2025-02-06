@@ -1,0 +1,6 @@
+{
+  "config.dc_bus_overvoltage_trip_level": 54,
+  "config.dc_bus_undervoltage_trip_level": 38,
+  "config.dc_max_positive_current": 16,
+  "config.dc_max_negative_current": -3
+}
