@@ -79,10 +79,16 @@ class CanSimpleNode():
                 return True
         return False
 
-
     def set_velocity(self, vel:float):
         self.bus.send(can.Message(
             arbitration_id=(self.node_id << 5 | 0x0d), # 0x0d: Set_Input_Vel
             data=struct.pack('<ff', vel, 0.0), # 1.0: velocity, 0.0: torque feedforward
+            is_extended_id=False
+        ))
+
+    def set_position(self, pos: float, vel_feedforward: float = 0.0):
+        self.bus.send(can.Message(
+            arbitration_id=(self.node_id << 5 | 0x0c),  # 0x0c: Set_Input_Pos
+            data=struct.pack('<fff', pos, vel_feedforward, 0.0),  # Position, velocity, torque
             is_extended_id=False
         ))
