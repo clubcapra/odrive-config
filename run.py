@@ -33,8 +33,8 @@ bus = can.interface.Bus("can0", bustype="socketcan", bytrate=250000)
 # Flush CAN RX buffer so there are no more old pending messages
 while not (bus.recv(timeout=0) is None): pass
 
-right_tracks_node_ids = [21, 22]
-left_tracks_node_ids = [23, 24]
+right_tracks_node_ids = [23, 24]
+left_tracks_node_ids = [21, 22]
 
 # Initialize CAN nodes dynamically
 right_tracks = [CanSimpleNode(bus, node_id) for node_id in right_tracks_node_ids]

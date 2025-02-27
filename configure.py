@@ -14,9 +14,9 @@ flipper_config_file = "config/_flipper.json"
 config_files = ["config/can.json", "config/encoder.json", "config/power_source.json"]
 
 # tracks_node_ids = [21, 22, 23, 24]
-tracks_node_ids = [11, 22, 23, 13]
+tracks_node_ids = [21, 22, 23, 24]
 # flipper_node_ids = [11, 12, 13, 14]
-flipper_node_ids = []
+flipper_node_ids = [11, 12, 13, 14]
 
 IDLE=1
 CALIBRATION=3
@@ -103,7 +103,6 @@ class EndpointAccess():
             if math.isnan(return_value) != math.isnan(val_pruned):
                 raise Exception(f"failed to write {path}: {return_value} != {val_pruned}")
 
-
 async def restore_config(odrv: EndpointAccess, config: dict):
     print(f"writing {len(config)} variables...")
     for k, v in config.items():
@@ -143,16 +142,20 @@ async def main():
     track_config_list = {}
     flipper_config_list = {}
 
+    # Load all the common configuration files
     for file in config_files:
         with open(file, 'r') as f:
             config_list.update(json.load(f))
 
+    # Load the specific configuration files
     with open(track_config_file, 'r') as f:
         track_config_list.update(json.load(f))
-    track_config_list.update(config_list)
 
     with open(flipper_config_file, 'r') as f:
         flipper_config_list.update(json.load(f))
+
+    # Merge the common configuration files with the specific configuration files
+    track_config_list.update(config_list)
     flipper_config_list.update(config_list)
 
     print("opening CAN bus...")
