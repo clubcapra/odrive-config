@@ -2,7 +2,7 @@
   "config.brake_resistor0.enable": false,
   "axis0.config.motor.motor_type": 0,
   "axis0.config.motor.pole_pairs": 3,
-  "axis0.config.motor.torque_constant": 0.09397727272727273,
+  "axis0.config.motor.torque_constant": 0.1,
   "axis0.config.motor.current_soft_max": 14,
   "axis0.config.motor.current_hard_max": 20,
   "axis0.config.motor.calibration_current": 1,
