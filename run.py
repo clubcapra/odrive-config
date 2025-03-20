@@ -90,7 +90,13 @@ isClearError = False
 try:
     while True:
         sleep(0.1)
-        speed = max(xbox_controller.RightTrigger * max_speed - 0.1, 0)
+
+        if xbox_controller.LeftBumper == 1:
+            multiplier = 0.5
+        else:
+            multiplier = 1
+
+        speed = max(xbox_controller.RightTrigger * max_speed - 0.1, 0) * multiplier
 
         if (xbox_controller.A == 1 or xbox_controller.RightBumper == 1) and not isOpen:
             use_tank_drive = xbox_controller.A == 1
@@ -131,13 +137,13 @@ try:
         else:
             if use_tank_drive:
                 left, right = tank_drive(xbox_controller.LeftJoystickX, xbox_controller.LeftJoystickY)
-                runRight(right * max_speed)
-                runLeft(left * max_speed)
+                runRight(right * max_speed * multiplier)
+                runLeft(left * max_speed * multiplier)
                 if debug_print:
                     print(f'{xbox_controller.LeftJoystickX:.2f} {xbox_controller.LeftJoystickY:.2f} {left:.2f} {right:.2f}')
             else:
-                runRight(xbox_controller.RightJoystickY * max_speed)
-                runLeft(xbox_controller.LeftJoystickY * max_speed)
+                runRight(xbox_controller.RightJoystickY * max_speed * multiplier)
+                runLeft(xbox_controller.LeftJoystickY * max_speed * multiplier)
                 if debug_print:
                     print(f'{xbox_controller.LeftJoystickY:.2f} {xbox_controller.RightJoystickY:.2f}')
 
