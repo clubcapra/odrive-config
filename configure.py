@@ -15,6 +15,7 @@ config_files = ["config/can.json", "config/encoder.json", "config/power_source.j
 
 # tracks_node_ids = [21, 22, 23, 24]
 tracks_node_ids = [21, 22, 23, 24]
+
 # flipper_node_ids = [11, 12, 13, 14]
 flipper_node_ids = [11, 12, 13, 14]
 
@@ -55,7 +56,11 @@ class EndpointAccess():
         ))
 
         # Await reply
-        msg = await self.node.await_msg(_GET_VERSION_CMD)
+        try:
+            msg = await self.node.await_msg(_GET_VERSION_CMD)
+        except asyncio.exceptions.TimeoutError:
+            print("No response: Timeout error")
+            return False
 
         _, hw_product_line, hw_version, hw_variant, fw_major, fw_minor, fw_revision, fw_unreleased = struct.unpack('<BBBBBBBB', msg.data)
         hw_version_str = f"{hw_product_line}.{hw_version}.{hw_variant}"
