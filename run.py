@@ -130,7 +130,7 @@ try:
 
         else:
             if use_tank_drive:
-                right, left = tank_drive(xbox_controller.LeftJoystickX, xbox_controller.LeftJoystickY)
+                left, right = tank_drive(xbox_controller.LeftJoystickX, xbox_controller.LeftJoystickY)
                 runRight(right * max_speed)
                 runLeft(left * max_speed)
                 if debug_print:
