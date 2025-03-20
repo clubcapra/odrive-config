@@ -8,7 +8,7 @@
   "axis0.config.motor.calibration_current": 1,
   "axis0.config.motor.resistance_calib_max_voltage": 3,
   "axis0.config.calibration_lockin.current": 10,
-  "axis0.motor.motor_thermistor.config.enabled": true,
+  "axis0.motor.motor_thermistor.config.enabled": false,
   "axis0.motor.motor_thermistor.config.r_ref": 10000,
   "axis0.motor.motor_thermistor.config.beta": 3984,
   "axis0.motor.motor_thermistor.config.temp_limit_lower": 40,
