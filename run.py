@@ -375,11 +375,20 @@ async def control_main_loop(xbox: XboxController,
 
         await asyncio.sleep(MAIN_LOOP_INTERVAL)
 
-async def logger_loop(xbox: XboxController):
-    with Logger('xbox', 'RB', 'Up', 'A', 'LS Y') as logger:
+async def logger_loop(all_nodes: List[CanSimpleNode]):
+    fields = [
+        'voltage',
+        'current',
+        'torque',
+        'velocity',
+        'motor_temp',
+        'fet_temp',
+    ]
+    with MultiContext([Logger(f'node_{node.node_id}', *fields) for node in all_nodes]) as loggers:
         while True:
-            logger.entry(int(xbox.RightBumper.state), int(xbox.UpDPad.state), int(xbox.A.state), xbox.LeftJoystickY.value)
-            await asyncio.sleep(0.001)
+            for node, logger in zip(all_nodes, loggers):
+                logger.entry(node.voltage, node.current, node.torque, node.velocity, node.motorTemperature, node.fetTemperature)
+            await asyncio.sleep(1.0)
 
 async def control(xbox: XboxController, mockFlippers: bool):
     with MultiContext([]) if mockFlippers else init_can_bus() as ctx:
@@ -476,7 +485,7 @@ async def control(xbox: XboxController, mockFlippers: bool):
                                             tracks,
                                             flipper_devs),
                             # command_loop(flipper_devs),
-                            # logger_loop(xbox),
+                            logger_loop(all_nodes),
                         )
 
         except KeyboardInterrupt:
