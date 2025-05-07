@@ -337,6 +337,8 @@ class Flipper:
         self._zero: float = 0.0
         self._setPosition: float = 0.0
         self.instructions: List[Instruction] = []
+        self._loaded_pos = 0.0
+        self._loading_pos = False
 
     @property
     def _position(self) -> float:
@@ -352,6 +354,10 @@ class Flipper:
     
     @property
     def position(self) -> float:
+        if self._loading_pos:
+            if self.node.connected:
+                self._zero = self._position - self._loaded_pos
+                self._loading_pos = False
         return self._position - self._zero
 
     def _sendPosition(self):
@@ -382,6 +388,10 @@ class Flipper:
     def zero(self):
         self._zero = self._position
         
+    def load_position(self, pos: float):
+        self._loaded_pos = pos
+        self._loading_pos = True
+        
 def ensure_flipper_config() -> bool:
     if FLIPPER_OFFSETS_PATH.exists():
         return True
@@ -399,7 +409,7 @@ def load_flippers(flippers: Dict[str, Flipper]):
             print("No data")
             return
         for name, zero in data.items():
-            flippers[name]._zero = flippers[name]._position - zero
+            flippers[name].load_position(zero)
         
 def save_flippers(flippers: Dict[str, Flipper]):
     data: Dict[str, float] = dict()

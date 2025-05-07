@@ -202,9 +202,6 @@ def read_positions():
                     print("Application exited")
         asyncio.run(run())
 
-async def load_flippers_delay(flipper_devs: Dict[Pos, Flipper]):
-    await asyncio.sleep(5)
-    load_flippers(flipper_devs)
     
 
 async def control_main_loop(xbox: XboxController,
@@ -327,14 +324,19 @@ async def control(xbox: XboxController, mockFlippers: bool):
         for node in all_nodes:
             node.clear_errors_msg()
             node.set_state_msg(IDLE)
+        load_flippers(flipper_devs)
 
-        async def onExit(): # TODO Fix this. It wont work because the read_loop is stopped
+        async def onExit():
             if not mockFlippers:
                 print("DO NOT KILL THE PROGRAM SAVING FLIPPER POSITIONS IN 3 SECCONDS!!!")
-                for node in all_nodes:
-                    node.call_estop()
+                try:
+                    for node in all_nodes:
+                        node.call_estop()
+                except Exception as e:
+                    print(f"Couldn't call estop: {e}")
                 await asyncio.sleep(3)
                 try:
+                    # Read the messages for 1 second to get latest position
                     await asyncio.wait([read_loop(reader, all_nodes)], timeout=1)
                 except asyncio.TimeoutError:
                     pass
@@ -364,7 +366,6 @@ async def control(xbox: XboxController, mockFlippers: bool):
                                             flippers,
                                             tracks,
                                             flipper_devs),
-                            load_flippers_delay(flipper_devs),
                         )
 
         except KeyboardInterrupt:
@@ -417,7 +418,7 @@ def main():
                 print()
                 for name, action in actions.items():
                     if isinstance(action, Axis):
-                        print(f'{name} raw: {str(action.raw).zfill(5)} actual: {str(round(action.value, 3)).zfill(6)}')
+                        print(f'{name} raw: {str(action.raw).ljust(5)} actual: {str(round(action.value, 3)).ljust(6)}')
                     if isinstance(action, Button):
                         fields.append(f'{name}:{1 if action.state else 0}')
                 print('|'.join(fields))
