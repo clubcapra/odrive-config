@@ -2,6 +2,7 @@
 import asyncio
 import can
 import struct
+import time
 
 from odrive_error_codes import get_error_description
 
@@ -15,11 +16,15 @@ REBOOT_ACTION_SAVE = 1
 REBOOT_ACTION_ERASE = 2
 
 class CanSimpleNode():
-    def __init__(self, bus: can.Bus, node_id: int):
+    def __init__(self, bus: can.Bus, node_id: int): # type: ignore
         self.bus = bus
         self.node_id = node_id
         self.reader = can.AsyncBufferedReader()
+        self.stateChanged = False
         self.connected = False
+        self.state = 0
+        self.voltage = 0
+        self.current = 0
 
     def __enter__(self):
         self.notifier = can.Notifier(self.bus, [self.reader], loop=asyncio.get_running_loop())
@@ -65,19 +70,22 @@ class CanSimpleNode():
             data=struct.pack('<I', state),
             is_extended_id=False
         ))
-        self.connected = False
+        self.stateChanged = False
     
-    def wait_state(self, stateWaited: int, msg):
-        if self.connected:
-            return True
+    def handle_msg(self, msg):
         if msg.arbitration_id == (self.node_id << 5 | 0x01):  # Heartbeat
+            self.connected = True
             error, state, result, traj_done = struct.unpack('<IBBB', bytes(msg.data[:7]))
-            if state == stateWaited:
-                if error != 0:
-                    self.getErrorDescription(error)  # Check for error codes
-                self.connected = True
-                return True
-        return False
+            self.state = state
+            if error != 0:
+                self.getErrorDescription(error)  # Check for error codes
+
+        if msg.arbitration_id == (self.node_id << 5 | 0x17): # Bus Voltage
+            self.voltage, self.current = struct.unpack('<ff', msg.data)
+
+
+    def wait_state(self, stateWaited: int):
+        return stateWaited == self.state
 
     def set_velocity(self, vel:float):
         self.bus.send(can.Message(
@@ -92,3 +100,16 @@ class CanSimpleNode():
             data=struct.pack('<fff', pos, vel_feedforward, 0.0),  # Position, velocity, torque
             is_extended_id=False
         ))
+
+    def get_encoder_estimates(self, timeout=1.0):
+        """
+        Wait for a 'Get_Encoder_Estimates' message (ID 0x09) from this node.
+        Returns (pos_estimate, vel_estimate) as floats.
+        """
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            msg = self.bus.recv(timeout=0.1)
+            if msg and msg.arbitration_id == (self.node_id << 5 | 0x09):
+                pos, vel = struct.unpack('<ff', msg.data)
+                return pos
+        raise TimeoutError(f"Node {self.node_id}: No encoder estimate received within {timeout} s")
