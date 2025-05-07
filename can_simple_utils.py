@@ -2,7 +2,6 @@
 import asyncio
 import can
 import struct
-import time
 
 from odrive_error_codes import get_error_description
 
@@ -10,29 +9,34 @@ ADDRESS_CMD = 0x06
 SET_AXIS_STATE_CMD = 0x07
 REBOOT_CMD = 0x16
 CLEAR_ERRORS_CMD = 0x18
+SET_INPUT_POS_CMD = 0x0C  # Set_Input_Pos command ID
+
+# Newly added CANSimple Get_... command IDs
+GET_ENCODER_ESTIMATES_CMD = 0x09
+GET_TEMPERATURE_CMD = 0x15
+GET_BUS_VOLTAGE_CURRENT_CMD = 0x17
+GET_POWERS_CMD = 0x1D
+GET_TORQUES_CMD = 0x1C
 
 REBOOT_ACTION_REBOOT = 0
 REBOOT_ACTION_SAVE = 1
 REBOOT_ACTION_ERASE = 2
 
 class CanSimpleNode():
-    def __init__(self, bus: can.Bus, node_id: int): # type: ignore
+    def __init__(self, bus: can.Bus, node_id: int):
         self.bus = bus
         self.node_id = node_id
         self.reader = can.AsyncBufferedReader()
-        self.stateChanged = False
         self.connected = False
-        self.state = 0
-        self.voltage = 0
-        self.current = 0
 
     def __enter__(self):
-        self.notifier = can.Notifier(self.bus, [self.reader], loop=asyncio.get_running_loop())
+        self.notifier = can.Notifier(
+            self.bus, [self.reader], loop=asyncio.get_running_loop()
+        )
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.notifier.stop()
-        pass
 
     def flush_rx(self):
         while not self.reader.buffer.empty():
@@ -41,14 +45,15 @@ class CanSimpleNode():
     def await_msg(self, cmd_id: int, timeout=1.0):
         async def _impl():
             async for msg in self.reader:
-                if msg.arbitration_id == (self.node_id << 5 | cmd_id):
+                if msg.arbitration_id == ((self.node_id << 5) | cmd_id):
                     return msg
         return asyncio.wait_for(_impl(), timeout)
 
     def clear_errors_msg(self, identify: bool = False):
+        data = b'\x01' if identify else b'\x00'
         self.bus.send(can.Message(
             arbitration_id=(self.node_id << 5) | CLEAR_ERRORS_CMD,
-            data=b'\x01' if identify else b'\x00',
+            data=data,
             is_extended_id=False
         ))
 
@@ -60,56 +65,128 @@ class CanSimpleNode():
         ))
 
     def getErrorDescription(self, error_code):
-        error_description = get_error_description(error_code)
-        print(f"CAN {self.node_id} Error Code: {error_code} - {error_description}")
+        desc = get_error_description(error_code)
+        print(f"CAN {self.node_id} Error Code: {error_code} - {desc}")
         self.clear_errors_msg()
 
     def set_state_msg(self, state: int):
+        payload = struct.pack('<I', state)
         self.bus.send(can.Message(
-            arbitration_id=(self.node_id << 5 | SET_AXIS_STATE_CMD),
-            data=struct.pack('<I', state),
+            arbitration_id=(self.node_id << 5) | SET_AXIS_STATE_CMD,
+            data=payload,
             is_extended_id=False
         ))
-        self.stateChanged = False
-    
-    def handle_msg(self, msg):
-        if msg.arbitration_id == (self.node_id << 5 | 0x01):  # Heartbeat
-            self.connected = True
-            error, state, result, traj_done = struct.unpack('<IBBB', bytes(msg.data[:7]))
-            self.state = state
-            if error != 0:
-                self.getErrorDescription(error)  # Check for error codes
+        self.connected = False
 
-        if msg.arbitration_id == (self.node_id << 5 | 0x17): # Bus Voltage
-            self.voltage, self.current = struct.unpack('<ff', msg.data)
+    def wait_state(self, stateWaited: int, msg):
+        if self.connected:
+            return True
+        expected_id = (self.node_id << 5) | 0x01  # Heartbeat cmd_id=1
+        if msg.arbitration_id == expected_id:
+            error, state, result, traj_done = struct.unpack('<IBBB', msg.data[:7])
+            if state == stateWaited:
+                if error != 0:
+                    self.getErrorDescription(error)
+                self.connected = True
+                return True
+        return False
 
-
-    def wait_state(self, stateWaited: int):
-        return stateWaited == self.state
-
-    def set_velocity(self, vel:float):
+    def set_velocity(self, vel: float):
+        payload = struct.pack('<ff', vel, 0.0)
         self.bus.send(can.Message(
-            arbitration_id=(self.node_id << 5 | 0x0d), # 0x0d: Set_Input_Vel
-            data=struct.pack('<ff', vel, 0.0), # 1.0: velocity, 0.0: torque feedforward
-            is_extended_id=False
-        ))
-
-    def set_position(self, pos: float, vel_feedforward: float = 0.0):
-        self.bus.send(can.Message(
-            arbitration_id=(self.node_id << 5 | 0x0c),  # 0x0c: Set_Input_Pos
-            data=struct.pack('<fff', pos, vel_feedforward, 0.0),  # Position, velocity, torque
+            arbitration_id=(self.node_id << 5) | 0x0D,  # Set_Input_Vel
+            data=payload,
             is_extended_id=False
         ))
 
-    def get_encoder_estimates(self, timeout=1.0):
+    def set_position(self, pos: float, vel_feedforward: float = 0.0, torque_feedforward: float = 0.0):
         """
-        Wait for a 'Get_Encoder_Estimates' message (ID 0x09) from this node.
-        Returns (pos_estimate, vel_estimate) as floats.
+        Set target position (revolutions) with optional velocity and torque feed-forward.
+
+        Frame layout:
+          Bytes 0-3: Input_Pos (float32, rev)
+          Bytes 4-5: Vel_FF (int16, 0.001 rev/s)
+          Bytes 6-7: Torque_FF (int16, 0.001 Nm)
         """
-        start_time = time.time()
-        while time.time() - start_time < timeout:
-            msg = self.bus.recv(timeout=0.1)
-            if msg and msg.arbitration_id == (self.node_id << 5 | 0x09):
-                pos, vel = struct.unpack('<ff', msg.data)
-                return pos
-        raise TimeoutError(f"Node {self.node_id}: No encoder estimate received within {timeout} s")
+        vel_int = int(vel_feedforward * 1000)
+        torque_int = int(torque_feedforward * 1000)
+        data = struct.pack('<fhh', pos, vel_int, torque_int)
+        self.bus.send(can.Message(
+            arbitration_id=(self.node_id << 5) | SET_INPUT_POS_CMD,
+            data=data,
+            is_extended_id=False
+        ))
+
+    def call_estop(self):
+        self.bus.send(can.Message(
+            arbitration_id=(self.node_id << 5) | 0x02,  # Estop cmd_id=2
+            data=b'',
+            is_extended_id=False
+        ))
+
+    # ----- Newly added getters for feedback -----
+
+    def get_encoder_estimates_msg(self):
+        """Request encoder position and velocity."""
+        self.bus.send(can.Message(
+            arbitration_id=(self.node_id << 5) | GET_ENCODER_ESTIMATES_CMD,
+            is_extended_id=False,
+            is_remote_frame=True
+        ))
+
+    async def get_encoder_estimates(self, timeout=1.0):
+        self.get_encoder_estimates_msg()
+        msg = await self.await_msg(GET_ENCODER_ESTIMATES_CMD, timeout)
+        return struct.unpack('<ff', msg.data)
+
+    def get_temperature_msg(self):
+        """Request FET and motor temperatures."""
+        self.bus.send(can.Message(
+            arbitration_id=(self.node_id << 5) | GET_TEMPERATURE_CMD,
+            is_extended_id=False,
+            is_remote_frame=True
+        ))
+
+    async def get_temperature(self, timeout=1.0):
+        self.get_temperature_msg()
+        msg = await self.await_msg(GET_TEMPERATURE_CMD, timeout)
+        return struct.unpack('<ff', msg.data)
+
+    def get_bus_voltage_current_msg(self):
+        """Request bus voltage and current."""
+        self.bus.send(can.Message(
+            arbitration_id=(self.node_id << 5) | GET_BUS_VOLTAGE_CURRENT_CMD,
+            is_extended_id=False,
+            is_remote_frame=True
+        ))
+
+    async def get_bus_voltage_current(self, timeout=1.0):
+        self.get_bus_voltage_current_msg()
+        msg = await self.await_msg(GET_BUS_VOLTAGE_CURRENT_CMD, timeout)
+        return struct.unpack('<ff', msg.data)
+
+    def get_torques_msg(self):
+        """Request torque setpoint and estimate."""
+        self.bus.send(can.Message(
+            arbitration_id=(self.node_id << 5) | GET_TORQUES_CMD,
+            is_extended_id=False,
+            is_remote_frame=True
+        ))
+
+    async def get_torques(self, timeout=1.0):
+        self.get_torques_msg()
+        msg = await self.await_msg(GET_TORQUES_CMD, timeout)
+        return struct.unpack('<ff', msg.data)
+
+    def get_powers_msg(self):
+        """Request electrical and mechanical power."""
+        self.bus.send(can.Message(
+            arbitration_id=(self.node_id << 5) | GET_POWERS_CMD,
+            is_extended_id=False,
+            is_remote_frame=True
+        ))
+
+    async def get_powers(self, timeout=1.0):
+        self.get_powers_msg()
+        msg = await self.await_msg(GET_POWERS_CMD, timeout)
+        return struct.unpack('<ff', msg.data)

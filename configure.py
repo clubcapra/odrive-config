@@ -17,7 +17,7 @@ config_files = ["config/can.json", "config/encoder.json", "config/power_source.j
 tracks_node_ids = [21, 22, 23, 24]
 
 # flipper_node_ids = [11, 12, 13, 14]
-flipper_node_ids = [11, 12, 13, 14]
+flipper_node_ids = [11,12,13,14]
 
 IDLE=1
 CALIBRATION=3
@@ -130,7 +130,8 @@ async def configure(node_id, bus, config, save_config, calibrate):
             print(f"calibrating...")
             
             for msg in bus:
-                if odrv.node.wait_state(IDLE, msg):
+                odrv.node.handle_msg(msg)
+                if odrv.node.wait_state(IDLE):
                     break
             node.reboot_msg(REBOOT_ACTION_SAVE)
 
@@ -164,7 +165,7 @@ async def main():
     flipper_config_list.update(config_list)
 
     print("opening CAN bus...")
-    with can.interface.Bus(args.channel, bustype=args.interface, bitrate=args.bitrate) as bus:
+    with can.interface.Bus(args.channel, interface=args.interface, bitrate=args.bitrate) as bus:
         #reader = can.AsyncBufferedReader()
         #notifier = can.Notifier(bus, [reader], loop=asyncio.get_running_loop())
         for node_id in tracks_node_ids:

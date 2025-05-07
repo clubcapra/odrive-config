@@ -78,6 +78,7 @@ class XboxController(object):
         self._monitor_thread = threading.Thread(target=self._monitor_controller, args=())
         self._monitor_thread.daemon = True
         self._monitor_thread.start()
+        print("Started XBox controller manager")
 
     def _monitor_controller(self):
         """
@@ -120,9 +121,9 @@ class XboxController(object):
                         self.RightBumper = event.value
                     elif event.code == evdev.ecodes.BTN_SOUTH:
                         self.A = event.value
-                    elif event.code == evdev.ecodes.BTN_NORTH:
-                        self.Y = event.value
                     elif event.code == evdev.ecodes.BTN_WEST:
+                        self.Y = event.value
+                    elif event.code == evdev.ecodes.BTN_NORTH:
                         self.X = event.value
                     elif event.code == evdev.ecodes.BTN_EAST:
                         self.B = event.value

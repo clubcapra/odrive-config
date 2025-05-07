@@ -1,161 +1,175 @@
-"""
-Minimal example for controlling an ODrive via the CANSimple protocol.
-
-Puts the ODrive into closed loop control mode, sends a velocity setpoint of 1.0
-and then prints the encoder feedback.
-
-Assumes that the ODrive is already configured for velocity control.
-
-See https://docs.odriverobotics.com/v/latest/manual/can-protocol.html for protocol
-documentation.
-"""
-
 import can
 import struct
-
-from can_simple_utils import CanSimpleNode
-
-import tty
-import sys
-import termios
-
-from xbox_controller import XboxController
+import threading
+import time
 from time import sleep
 
-CLOSED_LOOP_CONTROL=8
-IDLE=1
+from can_simple_utils import CanSimpleNode
+from xbox_controller import XboxController
 
-min_speed = 0
-max_speed = 58
+# Control modes
+CLOSED_LOOP_CONTROL = 8
+IDLE = 1
 
-bus = can.interface.Bus("can0", interface="socketcan", bytrate=250000)
+# Drive parameters
+MAX_TRACK_SPEED = 58        # rev/s
+FLIPPER_SPEED = 58.0         # rev/s
+MAIN_LOOP_INTERVAL = 0.1    # seconds
+WATCHDOG_INTERVAL = 1.0     # seconds
+TEMP_LOG_INTERVAL = 2.0     # seconds
 
-# Flush CAN RX buffer so there are no more old pending messages
-while not (bus.recv(timeout=0) is None): pass
+# CAN node IDs
+TRACK_IDS = {
+    'left':  [21, 22],
+    'right': [23, 24],
+}
+FLIPPER_IDS = [11,12,13,14]
+GET_TEMPERATURE_CMD = 0x15
 
-right_tracks_node_ids = [23, 24]
-left_tracks_node_ids = [21, 22]
 
-# Initialize CAN nodes dynamically
-right_tracks = [CanSimpleNode(bus, node_id) for node_id in right_tracks_node_ids]
-left_tracks = [CanSimpleNode(bus, node_id) for node_id in left_tracks_node_ids]
+def init_can_bus(channel='can0', bitrate=500000):
+    print("Starting can bus")
+    bus = can.interface.Bus(channel=channel, interface='socketcan', bitrate=bitrate)
+    # flush pending frames
+    while bus.recv(timeout=0):
+        pass
+    print("Done")
+    return bus
 
-use_tank_drive = False
-debug_print = False
 
-def tank_drive(x_axis, y_axis):
-    left_speed = y_axis + x_axis
-    right_speed = y_axis - x_axis
-    left_speed = max(-1, min(1, left_speed))
-    right_speed = max(-1, min(1, right_speed))
-    return left_speed, right_speed
+def create_nodes(bus):
+    print("Creating nodes")
+    tracks = {side: [CanSimpleNode(bus, nid) for nid in ids]
+              for side, ids in TRACK_IDS.items()}
+    flippers = [CanSimpleNode(bus, nid) for nid in FLIPPER_IDS]
+    print("Done")
+    return tracks, flippers
 
-def set_state(state):
-    for node in right_tracks + left_tracks:
-        node.set_state_msg(state)
-    waitState(state)
-    print("Mode:", "Controlled" if state == CLOSED_LOOP_CONTROL else "Idle")
 
-def runRight(speed):
-    for node in right_tracks:
-        node.set_velocity(speed)
-
-def runLeft(speed):
-    for node in left_tracks:
-        node.set_velocity(-speed)
-
-def clearErr():
-    for node in right_tracks + left_tracks:
-        node.clear_errors_msg()
-
-def waitState(stateWaited):
-    for msg in bus:
-        for node in right_tracks + left_tracks:
-            node.wait_state(stateWaited, msg)
-        if debug_print:
-            print([node.connected for node in right_tracks + left_tracks])
-        if all(node.connected for node in right_tracks + left_tracks):
-            break
-
-clearErr()
-set_state(IDLE)
-
-for node in right_tracks + left_tracks:
-    node.set_velocity(0)
-
-xbox_controller = XboxController()
-isOpen = False
-isClearError = False
-
-try:
+def estop_monitor(nodes, bus, heartbeat):
+    """Shuts down motors if heartbeat is missed."""
     while True:
-        sleep(0.1)
+        heartbeat.clear()
+        if not heartbeat.wait(timeout=WATCHDOG_INTERVAL):
+            print("[ERROR] No heartbeat: triggering E-Stop")
+            for node in nodes:
+                node.call_estop()
 
-        if xbox_controller.LeftBumper == 1:
-            multiplier = 0.5
-        else:
-            multiplier = 1
 
-        speed = max(xbox_controller.RightTrigger * max_speed - 0.1, 0) * multiplier
+def error_monitor(nodes, bus):
+    """Listens for node errors and triggers E-Stop if any occur."""
+    while True:
+        msg = bus.recv()
+        if msg and (msg.arbitration_id & 0x1F) == 0x01:
+            code = struct.unpack('<I', msg.data[:4])[0]
+            if code != 0:
+                nid = msg.arbitration_id >> 5
+                print(f"[ERROR] Node {nid} error {code}: triggering E-Stop")
+                for node in nodes:
+                    node.call_estop()
+                break
 
-        if (xbox_controller.A == 1 or xbox_controller.RightBumper == 1) and not isOpen:
-            use_tank_drive = xbox_controller.A == 1
-            set_state(CLOSED_LOOP_CONTROL)
-            isOpen = True
 
-        if ((xbox_controller.A == 0 and xbox_controller.RightBumper == 0) or not xbox_controller.Connected) and isOpen:
-            set_state(IDLE)
-            isOpen = False
+def clamp(val, lo=-1.0, hi=1.0):
+    return max(min(val, hi), lo)
 
-        if xbox_controller.B == 1 and not isClearError:
-            clearErr()
-            isClearError = True
 
-        if xbox_controller.B == 0 and isClearError:
-            isClearError = False
+def handle_tracks(controller, tracks, enabled):
+    """
+    Left stick X = throttle, Left stick Y = steering.
+    """
+    if enabled:
+        throttle = -clamp(controller.LeftJoystickX)
+        steering = clamp(controller.LeftJoystickY)
+        left_cmd  = throttle + steering
+        right_cmd = throttle - steering
+    else:
+        left_cmd = right_cmd = 0.0
 
-        if xbox_controller.UpDPad == 1:
-            runRight(speed)
-            runLeft(speed)
-            if debug_print: print("Moving forward", speed)
+    left_speed  = left_cmd  * MAX_TRACK_SPEED
+    right_speed = right_cmd * MAX_TRACK_SPEED
 
-        elif xbox_controller.DownDPad == 1:
-            runRight(-speed)
-            runLeft(-speed)
-            if debug_print: print("Moving backward", speed)
+    for node in tracks['left']:
+        node.set_velocity(left_speed)
+    for node in tracks['right']:
+        node.set_velocity(right_speed)
 
-        elif xbox_controller.LeftDPad == 1:
-            runRight(speed)
-            runLeft(-speed)
-            if debug_print: print("Turning left", speed)
 
-        elif xbox_controller.RightDPad == 1:
-            runRight(-speed)
-            runLeft(speed)
-            if debug_print: print("Turning right", speed)
+def handle_flippers(controller, flippers):
+    """Sets flipper velocities based on D-pad Up/Down."""
+    if controller.UpDPad:
+        vel = FLIPPER_SPEED
+    elif controller.DownDPad:
+        vel = -FLIPPER_SPEED
+    else:
+        vel = 0.0
 
-        else:
-            if use_tank_drive:
-                left, right = tank_drive(xbox_controller.LeftJoystickX, xbox_controller.LeftJoystickY)
-                runRight(right * max_speed * multiplier)
-                runLeft(left * max_speed * multiplier)
-                if debug_print:
-                    print(f'{xbox_controller.LeftJoystickX:.2f} {xbox_controller.LeftJoystickY:.2f} {left:.2f} {right:.2f}')
-            else:
-                runRight(xbox_controller.RightJoystickY * max_speed * multiplier)
-                runLeft(xbox_controller.LeftJoystickY * max_speed * multiplier)
-                if debug_print:
-                    print(f'{xbox_controller.LeftJoystickY:.2f} {xbox_controller.RightJoystickY:.2f}')
+    for node in flippers:
+        node.set_velocity(vel)
 
-except KeyboardInterrupt:
-    print()
 
-set_state(IDLE)
-bus.shutdown()
-print("Application exited")
+def main():
+    bus = init_can_bus()
+    tracks, flippers = create_nodes(bus)
+    all_nodes = tracks['left'] + tracks['right'] + flippers
 
-# Print encoder feedback
-# for msg in bus:
-#     if msg.arbitration_id == (node_id << 5 | 0x09): # 0x09: Get_Encoder_Estimates
-#         pos, vel = struct.unpack('<ff', bytes(msg.data))
-#         print(f"pos: {pos:.3f} [turns], vel: {vel:.3f} [turns/s]")
+    heartbeat = threading.Event()
+
+    threading.Thread(target=estop_monitor, args=(all_nodes, bus, heartbeat), daemon=True).start()
+    threading.Thread(target=error_monitor, args=(all_nodes, bus), daemon=True).start()
+
+    for node in all_nodes:
+        node.clear_errors_msg()
+        node.set_state_msg(IDLE)
+
+    xbox = XboxController()
+    drive_enabled = False
+    error_cleared = False
+
+    try:
+        while True:
+            heartbeat.set()
+
+            # E-Stop: bumpers
+            if xbox.LeftBumper or xbox.RightBumper:
+                for node in all_nodes:
+                    node.call_estop()
+                drive_enabled = False
+
+            # Toggle drive enable: A button
+            if xbox.A and not drive_enabled:
+                for node in all_nodes:
+                    node.set_state_msg(CLOSED_LOOP_CONTROL)
+                drive_enabled = True
+            elif (not xbox.A or not xbox.Connected) and drive_enabled:
+                for node in all_nodes:
+                    node.set_state_msg(IDLE)
+                drive_enabled = False
+
+            # Clear errors: B button
+            if xbox.B and not error_cleared:
+                for node in all_nodes:
+                    node.clear_errors_msg()
+                error_cleared = True
+            elif not xbox.B:
+                error_cleared = False
+
+            handle_tracks(xbox, tracks, drive_enabled)
+            handle_flippers(xbox, flippers)
+
+            sleep(MAIN_LOOP_INTERVAL)
+
+    except KeyboardInterrupt:
+        print("[INFO] KeyboardInterrupt: E-Stopping all nodes.")
+        for node in all_nodes:
+            node.call_estop()
+
+    finally:
+        for node in all_nodes:
+            node.set_state_msg(IDLE)
+        bus.shutdown()
+        print("Application exited")
+
+
+if __name__ == '__main__':
+    main()
