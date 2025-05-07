@@ -6,7 +6,8 @@ from dataclasses import dataclass
 import json
 import math
 import struct
-from can_simple_utils import CanSimpleNode, REBOOT_ACTION_SAVE # if this import fails, make sure you copy the whole folder from the git repository
+from can_simple_utils import CanSimpleNode # if this import fails, make sure you copy the whole folder from the git repository
+from odrive_types import ODriveAxisState, ODriveCommand, ODriveRebootAction
 
 endpoint_dir = "flat_endpoints/"
 track_config_file = "config/_track.json"
@@ -19,8 +20,6 @@ tracks_node_ids = [21, 22, 23, 24]
 # flipper_node_ids = [11, 12, 13, 14]
 flipper_node_ids = [11,12,13,14]
 
-IDLE=1
-CALIBRATION=3
 
 _OPCODE_READ = 0x00
 _OPCODE_WRITE = 0x01
@@ -35,11 +34,6 @@ _FORMAT_LOOKUP = {
     'float': 'f'
 }
 
-_GET_VERSION_CMD = 0x00 # Get_Version
-_RX_SDO = 0x04 # RxSdo
-_TX_SDO = 0x05 # TxSdo
-
-
 @dataclass
 class EndpointAccess():
     node: CanSimpleNode
@@ -50,14 +44,14 @@ class EndpointAccess():
 
         # Send read command
         self.node.bus.send(can.Message(
-            arbitration_id=(self.node.node_id << 5 | _GET_VERSION_CMD),
+            arbitration_id=(self.node.node_id << 5 | ODriveCommand.GET_VERSION_CMD),
             data=b'',
             is_extended_id=False
         ))
 
         # Await reply
         try:
-            msg = await self.node.await_msg(_GET_VERSION_CMD)
+            msg = await self.node.await_msg(ODriveCommand.GET_VERSION_CMD)
         except asyncio.exceptions.TimeoutError:
             print("No response: Timeout error")
             return False
@@ -84,7 +78,7 @@ class EndpointAccess():
         endpoint_fmt = _FORMAT_LOOKUP[endpoint_type]
 
         self.node.bus.send(can.Message(
-            arbitration_id=(self.node.node_id << 5 | _RX_SDO),
+            arbitration_id=(self.node.node_id << 5 | ODriveCommand.RX_SDO_CMD),
             data=struct.pack('<BHB' + endpoint_fmt, _OPCODE_WRITE, endpoint_id, 0, val),
             is_extended_id=False
         ))
@@ -92,12 +86,12 @@ class EndpointAccess():
         self.node.flush_rx()
 
         self.node.bus.send(can.Message(
-            arbitration_id=(self.node.node_id << 5 | _RX_SDO),
+            arbitration_id=(self.node.node_id << 5 | ODriveCommand.RX_SDO_CMD),
             data=struct.pack('<BHB', _OPCODE_READ, endpoint_id, 0),
             is_extended_id=False
         ))
 
-        msg = await self.node.await_msg(_TX_SDO)
+        msg = await self.node.await_msg(ODriveCommand.TX_SDO_CMD)
 
         # Unpack and cpmpare reply
         _, _, _, return_value = struct.unpack_from('<BHB' + endpoint_fmt, msg.data)
@@ -124,16 +118,16 @@ async def configure(node_id:int, bus:can.BusABC, config:dict, save_config:bool, 
             print()
             if save_config:
                 print(f"saving configuration...")
-                node.reboot_msg(REBOOT_ACTION_SAVE)
+                node.reboot_msg(ODriveRebootAction.REBOOT_ACTION_SAVE)
         if calibrate:
-            odrv.node.set_state_msg(CALIBRATION)
+            odrv.node.set_state_msg(ODriveAxisState.CALIBRATION)
             print(f"calibrating...")
             
             for msg in bus:
-                odrv.node.handle_msg(msg)
-                if odrv.node.wait_state(IDLE):
+                odrv.node.read_msg(msg)
+                if odrv.node.wait_state(ODriveAxisState.IDLE, msg):
                     break
-            node.reboot_msg(REBOOT_ACTION_SAVE)
+            node.reboot_msg(ODriveRebootAction.REBOOT_ACTION_SAVE)
 
 async def main():
     parser = argparse.ArgumentParser(description='Script to configure ODrive over CAN bus.')

@@ -20,6 +20,8 @@ import prompt_toolkit.styles
 import prompt_toolkit.utils
 import prompt_toolkit.widgets
 
+from common import Logger
+
 MAX_TRIG_VAL = 1_023
 # MAX_JOY_VAL = 32_768
 MAX_JOY_VAL = 65_535
@@ -89,34 +91,34 @@ class Button:
         self.binding = binding
         self.raw = 0
         self._lastRaw = 0
+        self.mutex = threading.Lock()
         
     @property
     def state(self) -> bool:
-        return mapValue(self.binding.minValue, self.binding.maxValue, 0, 1, self.raw) > 0.5
+        with self.mutex:
+            return mapValue(self.binding.minValue, self.binding.maxValue, 0, 1, self.raw) > 0.5
     
-    @property
-    def lastState(self) -> bool:
-        return mapValue(self.binding.minValue, self.binding.maxValue, 0, 1, self._lastRaw) > 0.5
+    # @property
+    # def lastState(self) -> bool:
+    #     return mapValue(self.binding.minValue, self.binding.maxValue, 0, 1, self._lastRaw) > 0.5
     
-    @property
-    def pressed(self) -> bool:
-        return self.state and not self.lastState
+    # @property
+    # def pressed(self) -> bool:
+    #     return self.state and not self.lastState
     
-    @property
-    def released(self) -> bool:
-        return not self.state and self.lastState
+    # @property
+    # def released(self) -> bool:
+    #     return not self.state and self.lastState
     
-    @property
-    def held(self) -> bool:
-        return self.state and self.lastState
+    # @property
+    # def held(self) -> bool:
+    #     return self.state and self.lastState
     
     def update(self, event:evdev.InputEvent):
         if event.type == self.binding.etype and event.code == self.binding.ecode:
-            self.raw = event.value
-
-    def __bool__(self) -> bool:
-        return self.state
-
+            with self.mutex:
+                self.raw = event.value
+            
 class Axis:
     def __init__(self, binding:Binding = Binding(), valueMin:float = -1.0, valueMax:float = 1.0):
         self.binding = binding
@@ -124,6 +126,7 @@ class Axis:
         self.valueMin = valueMin
         self.valueMax = valueMax
         self.deadzone = 0.1
+        self.mutex = threading.Lock()
     
     def _apply_deadzone(self, value:float) -> float:
         if not self.binding.deadzone:
@@ -135,16 +138,15 @@ class Axis:
         
     @property
     def value(self) -> float:
-        if self.raw == -1:
-            return mean([self.valueMin, self.valueMax])
-        return self._apply_deadzone(mapValue(self.binding.minValue, self.binding.maxValue, self.valueMin, self.valueMax, self.raw))
+        with self.mutex:
+            if self.raw == -1:
+                return mean([self.valueMin, self.valueMax])
+            return self._apply_deadzone(mapValue(self.binding.minValue, self.binding.maxValue, self.valueMin, self.valueMax, self.raw))
     
     def update(self, event:evdev.InputEvent):
         if event.type == self.binding.etype and event.code == self.binding.ecode:
-            self.raw = event.value
-    
-    def __float__(self) -> float:
-        return self.value
+            with self.mutex:
+                self.raw = event.value
     
 class XboxController(object):
     """
@@ -178,7 +180,7 @@ class XboxController(object):
     MAX_TRIG_VAL = 1_023
     MAX_JOY_VAL = 32_768
 
-    def __init__(self, bindings: ControllerBindings=ControllerBindings(), deadzone=0.1):
+    def __init__(self, bindings: ControllerBindings=ControllerBindings(), deadzone=0.1, startThread: bool = True):
         self._deadzone = deadzone
         """
         Initializes the XboxController object and starts the monitoring thread.
@@ -186,14 +188,13 @@ class XboxController(object):
         self.load_bindings(bindings)
         self.Connected = False
         self._monitor_thread = None
+        self._start_thread = startThread
         self.connect()
-
-        
+        self.logger = Logger('xbox', 'RB', 'Up', 'A', 'LS Y')
 
         print("Started XBox controller manager")
 
     def connect(self):
-            
         if not self.Connected:
             devices = [evdev.InputDevice(path) for path in evdev.list_devices()]
             self.device_path = ""
@@ -209,7 +210,7 @@ class XboxController(object):
 
             self.device:evdev.InputDevice = evdev.InputDevice(self.device_path)
             
-        if self._monitor_thread is None or not self._monitor_thread.is_alive():
+        if self._start_thread and (self._monitor_thread is None or not self._monitor_thread.is_alive()):
             self._monitor_thread = threading.Thread(target=self._monitor_controller, args=())
             self._monitor_thread.daemon = True
             self._monitor_thread.start()
@@ -392,10 +393,30 @@ class XboxController(object):
             sleep(0.1)
         return self.Connected
     
+    def _manage_event(self, event: evdev.InputEvent):
+        for btn in self.buttons.values():
+                btn.update(event)
+        for axis in self.axes.values():
+            axis.update(event)
+        self.LeftTriggerBtn.update(event)
+        self.RightTriggerBtn.update(event)
+        self.logger.entry(int(self.RightBumper.state), int(self.UpDPad.state), int(self.A.state), self.LeftJoystickY.value)
+    
+    async def read_async(self):
+        try:
+            self.Connected = True
+            async for event in self.device.async_read_loop():
+                self._manage_event(event)
+        except OSError:
+            print("Controller disconnected. Exiting the controller monitor thread.")
+            self.Connected = False
+    
     def _monitor_controller(self):
         """
         Monitors the Xbox controller for input events and updates the attributes accordingly.
         """
+        
+        
         try:
             self.Connected = True
             for event in self.device.read_loop():
@@ -451,12 +472,7 @@ class XboxController(object):
                 #         self.Back = event.value
                 #     elif event.code == evdev.ecodes.BTN_START:
                 #         self.Start = event.value
-                for btn in self.buttons.values():
-                    btn.update(event)
-                for axis in self.axes.values():
-                    axis.update(event)
-                self.LeftTriggerBtn.update(event)
-                self.RightTriggerBtn.update(event)
+                self._manage_event(event)
         except OSError:
             print("Controller disconnected. Exiting the controller monitor thread.")
             self.Connected = False

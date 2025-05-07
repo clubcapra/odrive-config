@@ -74,7 +74,7 @@ class FakeFlipper(CanSimpleNode):
 
     def getErrorDescription(self, error_code: int):
         desc = get_error_description(error_code)
-        print(f"CAN {self.node_id} Error Code: {error_code} - {desc}")
+        # print(f"CAN {self.node_id} Error Code: {error_code} - {desc}")
         self.clear_errors_msg()
 
     def set_state_msg(self, state: int):
@@ -137,6 +137,15 @@ class Instruction:
     """
     def __init__(self):
         self.flippers:List[Flipper] = []
+        self.acc = 90
+        self.offset = 0.0
+    
+    def predict_pos(self) -> float:
+        vel = mean([f.node.velocity for f in self.flippers])
+        if abs(vel) < 40:
+            return self.offset
+        distance = (vel ** 2) / (2 * self.acc)
+        return self.offset + distance if vel >= 0 else self.offset - distance
     
     def _addFlipper(self, flipper: Flipper):
         self.flippers.append(flipper)
@@ -199,14 +208,32 @@ class SingleInstruction(Instruction):
         self.controller = controller
         self.pos = pos
         self.setOffset = 0.0
-        self.offset = 0.0
         
         self.singleControl = StateBool()
         self.convergeControl = StateBool()
         self.zeroControl = StateBool()
+        # self._lastVel = 0.0
+        # self._lastAcc = 0.0
+        # self._lastCap = datetime.now()
+        # self.sacc = BufferedValue(20, 0.0)
+        # self.saccx = BufferedValue(20, 0.0)
         
     def update(self):
         self.offset = self.flippers[0].position - (self.flippers[0].setPosition - self.setOffset)
+        # now = datetime.now()
+        # delta = now - self._lastCap
+        # self._lastCap = now
+        # vel = mean([f.node.velocity for f in self.flippers])
+        # deltaVel = vel - self._lastVel
+        # self._lastVel = vel
+        # acc = deltaVel / delta.total_seconds()
+        # deltaAcc = self._lastAcc - acc
+        # self._lastAcc = acc
+        # self.sacc.value = acc
+        # accx = deltaAcc / delta.total_seconds()
+        # self.saccx.value = accx
+        # if self.flippers[0].node.node_id == 13:
+        #     print(f'vel: {niceFloat(vel)} acc: {niceFloat(acc)} accx: {niceFloat(accx)} sacc: {niceFloat(self.sacc.value)} saccx: {niceFloat(self.saccx.value)}')
     
     def command(self) -> float:
         # Is selected
@@ -241,7 +268,7 @@ class SingleInstruction(Instruction):
             elif self.controller.UpDPad.state:
                 self.setOffset = self.offset + FLIPPER_MOVE_OFFSET
         if self.singleControl.unlatched:
-            self.setOffset = self.offset
+            self.setOffset = self.predict_pos()
                 
         # Converge
         self.convergeControl.state = (pairSelected and self.controller.A.state and
@@ -249,7 +276,7 @@ class SingleInstruction(Instruction):
         if self.convergeControl.state:
             self.setOffset = 0
         if self.convergeControl.unlatched:
-            self.setOffset = self.offset
+            self.setOffset = self.predict_pos()
             
         # Zero
         self.zeroControl.state = selected and self.controller.LeftDPad.state and not self.controller.A.state
@@ -293,7 +320,7 @@ class PairInstruction(Instruction):
             if self.controller.UpDPad.state:
                 self.setOffset = self.offset + FLIPPER_MOVE_OFFSET
         if self.active.unlatched:
-            self.setOffset = self.offset
+            self.setOffset = self.predict_pos()
             
         # Converge
         self.convergeControl.state = (allSelected and self.controller.A.state and
@@ -301,7 +328,7 @@ class PairInstruction(Instruction):
         if self.convergeControl.state:
             self.setOffset = 0
         if self.convergeControl.unlatched:
-            self.setOffset = self.offset
+            self.setOffset = self.predict_pos()
         
         return self.setOffset
             
@@ -329,9 +356,27 @@ class AllInstruction(Instruction):
             if self.controller.UpDPad.state:
                 self.setOffset = self.offset + FLIPPER_MOVE_OFFSET
         if self.active.unlatched:
-            self.setOffset = self.offset
+            self.setOffset = self.predict_pos()
             
         return self.setOffset
+    
+class BufferedValue:
+    def __init__(self, length: int, default: float):
+        self._buff = list([default for _ in range(length)])
+        self.length = length
+        self._index = 0
+        
+    @property
+    def value(self) -> float:
+        return mean(self._buff)
+    
+    @value.setter
+    def value(self, value: float):
+        self._buff[self._index] = value
+        self._index = (self._index + 1) % self.length
+        
+    def __len__(self) -> int:
+        return self.length
     
 class Flipper:
     def __init__(self, node: CanSimpleNode):
@@ -363,27 +408,17 @@ class Flipper:
         return self._position - self._zero
 
     def _sendPosition(self):
-        speed = 0
-        torque = 0
-        delta = self._setPosition - self._position
-        if abs(delta) > 2:
-            speed = -max(0.1, min(10, abs(delta)*2))
-            torque = 1
-        # if delta < 0:
-        #     speed = -speed
-        #     torque = -torque
-        # self.node.set_position(self._setPosition, speed, torque)
         self.node.set_position(self._setPosition)
-        if self.node.node_id == 13:
-            print(f'delta: {niceFloat(delta)}, setpos: {niceFloat(self._setPosition)}, speed: {niceFloat(speed)}, torque: {niceFloat(torque)}')
 
     @property
     def setPosition(self) -> float:
         return self._setPosition - self._zero
+        # return self._setpointFilter.value - self._zero
     
     @setPosition.setter
     def setPosition(self, value: float):
         self._setPosition = value + self._zero
+        # self._setpointFilter.value = value + self._zero
         self._sendPosition()
         
     def update(self):

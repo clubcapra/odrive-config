@@ -9,17 +9,24 @@ import struct
 import threading
 import time
 from time import sleep
-from typing import Generic, List, Dict, Protocol, Sequence, Tuple, Literal, TypeVar, Union
+from typing import Any, Callable, Generic, List, Dict, Protocol, Sequence, Tuple, Literal, TypeVar, Union
 from asyncio import gather
 
+import prompt_toolkit.buffer
 import prompt_toolkit.completion
 import prompt_toolkit.contrib
 import prompt_toolkit.contrib.completers
 import prompt_toolkit.contrib.regular_languages
+import prompt_toolkit.enums
+import prompt_toolkit.input
+import prompt_toolkit.key_binding
+import prompt_toolkit.layout
 import prompt_toolkit.utils
 import prompt_toolkit.validation
+import prompt_toolkit.widgets
 
-from can_simple_utils import GET_ENCODER_ESTIMATES_CMD, CanSimpleNode
+from can_simple_utils import CanSimpleNode
+from odrive_types import ODriveAxisState, ODriveControlMode, ODriveInputMode
 from xbox_controller import Axis, Button, ControllerBindings, XboxController
 
 import prompt_toolkit
@@ -59,30 +66,6 @@ def estop_monitor(nodes: List[CanSimpleNode], bus: can.BusABC, heartbeat: thread
                 node.call_estop()
 
 
-def msg_monitor(nodes: List[CanSimpleNode], flippers: Dict[Pos, Flipper], posEvents: Dict[Pos, threading.Event], bus: can.BusABC) -> None:
-    """Listens for node errors and triggers E-Stop if any occur."""
-    while True:
-        msg = bus.recv()
-        if msg:
-            if (msg.arbitration_id & 0x1F) == 0x01:
-                code = struct.unpack('<I', msg.data[:4])[0]
-                if code != 0:
-                    nid = msg.arbitration_id >> 5
-                    print(f"[ERROR] Node {nid} error {code}: triggering E-Stop")
-                    for node in nodes:
-                        node.call_estop()
-                    break
-            elif (msg.arbitration_id & GET_ENCODER_ESTIMATES_CMD) == 0x01:
-                pos, vel = struct.unpack('<ff', msg.data)
-                nid = msg.arbitration_id >> 5
-                for n, f in flippers.items():
-                    if f.node.node_id == nid:
-                        f._position = pos
-                        f._velocity = vel
-                        print(f"{nid} pos: {pos} vel: {vel}")
-                        posEvents[n].set()
-        
-
 def clamp(val:float, lo:float=-1.0, hi:float=1.0) -> float:
     return max(min(val, hi), lo)
 
@@ -105,7 +88,7 @@ def handle_tracks(controller: XboxController, tracks: Dict[Side, List[CanSimpleN
     for node in tracks['left']:
         node.set_velocity(left_speed)
     for node in tracks['right']:
-        node.set_velocity(right_speed)
+        node.set_velocity(-right_speed)
 
 def xbox_binding_completer() -> Sequence[str]:
     return [f.stem for f in XBOX_CONFIG_PATH.iterdir()]
@@ -202,7 +185,111 @@ def read_positions():
                     print("Application exited")
         asyncio.run(run())
 
+async def command_loop(flipper_devs: Dict[Pos, Flipper]):
+    from prompt_toolkit.application import Application
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.layout import Layout, HSplit, VSplit
+    from prompt_toolkit.widgets import Button, Label, TextArea, Box, Frame
+    from prompt_toolkit.layout.controls import FormattedTextControl
+    from prompt_toolkit.layout.containers import Window
+    from prompt_toolkit.styles import Style
+    from prompt_toolkit.formatted_text import HTML
     
+
+    def is_float(val:str) -> bool:
+        if val == "":
+            return True
+        try:
+            float(val)
+            return True
+        except:
+            return False
+
+    def field(name: str, onSubmit: Callable[[TextArea], Any], onRead: Callable[[TextArea], float]):
+        return TextArea(height=1, multiline=False, focus_on_click=True, validator=prompt_toolkit.validation.Validator.from_callable(is_float), prompt=f'{name}: '), onSubmit, onRead
+
+    def set_value(func: Callable[[Flipper], Any]):
+        for f in flipper_devs.values():
+            func(f)
+    fields = [
+        field("inertia", lambda t: set_value(lambda f: f.node.set_inertia(float(t.text))), lambda t: flipper_devs['front_left'].node.inertia),
+        field("trap_vel", lambda t: set_value(lambda f:  setattr(f.node, 'trap_vel', float(t.text))), lambda t: flipper_devs['front_left'].node.trap_vel),
+        field("trap_accel", lambda t: set_value(lambda f: setattr(f.node, 'trap_accel', float(t.text))), lambda t: flipper_devs['front_left'].node.trap_accel),
+        field("trap_decel", lambda t: set_value(lambda f: setattr(f.node, 'trap_decel', float(t.text))), lambda t: flipper_devs['front_left'].node.trap_decel),
+    ]
+    
+    # --- UI State ---
+    output_label = Label(text="")
+
+    # --- Submit Button ---
+    def on_submit():
+        try:
+            for v in fields:
+                v[1](v[0])
+            for f in flipper_devs.values():
+                f.node.set_trap_config(f.node.trap_vel, f.node.trap_accel, f.node.trap_decel)
+            output_label.text = "updated successfully."
+        except ValueError:
+            output_label.text = "Invalid input. Speed and Angle must be floats."
+
+    submit_button = Button(text="Submit", handler=on_submit)
+
+    # --- Quit ---
+    def exit_app():
+        app.exit()
+
+    quit_button = Button(text="Quit", handler=exit_app)
+
+    # --- Layout ---
+    layout = Layout(
+        HSplit([
+            Label(text="Select a Flipper:"),
+            Frame(Box(HSplit([
+                *[f[0] for f in fields],
+                VSplit([submit_button, quit_button], padding=2),
+                output_label,
+            ]), padding=1, style="bg:#222222")),
+        ])
+    )
+
+    focusable_elements = [*[f[0] for f in fields], submit_button, quit_button]
+
+    # --- App ---
+    kb = KeyBindings()
+
+    @kb.add("c-c")
+    def _(event):
+        event.app.exit()
+
+    @kb.add("tab")
+    def _(event):
+        current = event.app.layout.current_control
+        for i, element in enumerate(focusable_elements):
+            if current == element.control:
+                next_index = (i + 1) % len(focusable_elements)
+                event.app.layout.focus(focusable_elements[next_index])
+                break
+
+    @kb.add("s-tab")
+    def _(event):
+        current = event.app.layout.current_control
+        for i, element in enumerate(focusable_elements):
+            if current == element.control:
+                prev_index = (i - 1) % len(focusable_elements)
+                event.app.layout.focus(focusable_elements[prev_index])
+                break
+
+    style = Style.from_dict({
+        "button": "bg:#444444 #ffffff",
+        "frame.label": "bg:#888888 #000000",
+    })
+
+    app = Application(layout=layout, 
+                      key_bindings=kb, 
+                      style=style, 
+                      editing_mode=prompt_toolkit.enums.EditingMode.EMACS,
+                      refresh_interval=1)
+    await app.run_async()
 
 async def control_main_loop(xbox: XboxController,
                             mockFlippers: bool, 
@@ -211,15 +298,13 @@ async def control_main_loop(xbox: XboxController,
                             flippers: Dict[Pos, CanSimpleNode],
                             tracks: Dict[Side, List[CanSimpleNode]],
                             flipper_devs: Dict[Pos, Flipper]):
-    
-    
     drive_enabled = False
     error_cleared = False
     while True:
         heartbeat.set()
 
         # E-Stop: bumpers
-        if xbox.LeftBumper.state or xbox.RightBumper.state:
+        if xbox.Start.state or xbox.Back.state:
             for node in all_nodes:
                 node.call_estop()
             drive_enabled = False
@@ -227,12 +312,17 @@ async def control_main_loop(xbox: XboxController,
         # Toggle drive enable: A button
         if xbox.A.state and not drive_enabled:
             for node in all_nodes:
-                node.set_state_msg(STATE_CLOSED_LOOP_CONTROL)
+                node.set_state_msg(ODriveAxisState.CLOSED_LOOP_CONTROL)
             drive_enabled = True
         elif (not xbox.A.state or not xbox.Connected) and drive_enabled:
             for node in all_nodes:
-                node.set_state_msg(STATE_IDLE)
+                node.set_state_msg(ODriveAxisState.IDLE)
             drive_enabled = False
+        if drive_enabled:
+            for flipper in flipper_devs.values():
+                # if flipper.node.state == ODriveAxisState.IDLE and abs(flipper.setPosition - flipper.position) > 0.5:
+                # if flipper.node.state == ODriveAxisState.IDLE:
+                flipper.node.set_state_msg(ODriveAxisState.CLOSED_LOOP_CONTROL)
 
         # Clear errors: B button
         if xbox.B.state and not error_cleared:
@@ -254,20 +344,20 @@ async def control_main_loop(xbox: XboxController,
             
         if not mockFlippers:
             handle_tracks(xbox, tracks, drive_enabled)
-            for name, flipper1 in flipper_devs.items():
-                if name != 'front_right':
-                    continue
-                shortName = ''.join([n[0] for n in name.split('_')]).upper()
-                values: Dict[str, float] = {
-                    '_p': flipper1._position,
-                    '_s': flipper1._setPosition,
-                    'P': flipper1.position,
-                    'S': flipper1.setPosition,
-                    '_v': flipper1._velocity,
-                    '_z': flipper1._zero,
-                }
-                fields = [f'{n}:{str(round(v, 3)).ljust(8)}' for n, v in values.items()]
-                print(f'{shortName}: {"|".join(fields)}')
+            # for name, flipper1 in flipper_devs.items():
+            #     if name != 'front_right':
+            #         continue
+            #     shortName = ''.join([n[0] for n in name.split('_')]).upper()
+            #     values: Dict[str, float] = {
+            #         '_p': flipper1._position,
+            #         '_s': flipper1._setPosition,
+            #         'P': flipper1.position,
+            #         'S': flipper1.setPosition,
+            #         '_v': flipper1._velocity,
+            #         '_z': flipper1._zero,
+            #     }
+            #     fields = [f'{n}:{str(round(v, 3)).ljust(8)}' for n, v in values.items()]
+            #     print(f'{shortName}: {"|".join(fields)}')
         else:
             print()
             for name, flipper in flipper_devs.items():
@@ -284,6 +374,12 @@ async def control_main_loop(xbox: XboxController,
                 print(f'{shortName}: {"|".join(fields)}')
 
         await asyncio.sleep(MAIN_LOOP_INTERVAL)
+
+async def logger_loop(xbox: XboxController):
+    with Logger('xbox', 'RB', 'Up', 'A', 'LS Y') as logger:
+        while True:
+            logger.entry(int(xbox.RightBumper.state), int(xbox.UpDPad.state), int(xbox.A.state), xbox.LeftJoystickY.value)
+            await asyncio.sleep(0.001)
 
 async def control(xbox: XboxController, mockFlippers: bool):
     with MultiContext([]) if mockFlippers else init_can_bus() as ctx:
@@ -325,11 +421,20 @@ async def control(xbox: XboxController, mockFlippers: bool):
 
         for node in all_nodes:
             node.clear_errors_msg()
-            node.set_state_msg(STATE_IDLE)
+            node.set_state_msg(ODriveAxisState.IDLE)
+        
         load_flippers(flipper_devs)
+        
+        for flipper in flippers.values():
+            flipper.set_controller_mode(ODriveControlMode.MODE_POSITION_CONTROL, ODriveInputMode.INPUT_POS_FILTER)
+            # flipper.set_controller_mode(ODriveControlMode.MODE_POSITION_CONTROL, ODriveInputMode.INPUT_PASSTHROUGH)
+            # flipper.set_controller_mode(ODriveControlMode.MODE_POSITION_CONTROL, ODriveInputMode.INPUT_TRAP_TRAJ)
+            # flipper.set_inertia(0.0)
+            # flipper.set_trap_config(55.0, 120.0, 120.0)
 
         async def onExit():
             if not mockFlippers:
+                flipper_devs['front_right'].node.close_log()
                 print("DO NOT KILL THE PROGRAM SAVING FLIPPER POSITIONS IN 3 SECCONDS!!!")
                 try:
                     for node in all_nodes:
@@ -347,11 +452,10 @@ async def control(xbox: XboxController, mockFlippers: bool):
 
         try:
             async with OnExit(onExit):
-                for flipper in flippers.values():
-                    flipper.set_traj_vel_limit(58)
                 while True:
                     if mockFlippers:
                         await asyncio.gather(
+                            xbox.read_async(),
                             control_main_loop(xbox,
                                             mockFlippers,
                                             heartbeat,
@@ -362,6 +466,7 @@ async def control(xbox: XboxController, mockFlippers: bool):
                         )
                     else:
                         await asyncio.gather(
+                            xbox.read_async(),
                             read_loop(reader, all_nodes),
                             control_main_loop(xbox,
                                             mockFlippers,
@@ -370,6 +475,8 @@ async def control(xbox: XboxController, mockFlippers: bool):
                                             flippers,
                                             tracks,
                                             flipper_devs),
+                            # command_loop(flipper_devs),
+                            # logger_loop(xbox),
                         )
 
         except KeyboardInterrupt:
@@ -377,14 +484,16 @@ async def control(xbox: XboxController, mockFlippers: bool):
 
         finally:
             print("Application exited")
+            xbox.logger.close()
 
 def main():
     mockFlippers = False
-    xbox = XboxController()
+    xbox = XboxController(startThread=False)
     if len(sys.argv) >= 2:
         if 'mock' in sys.argv:
             mockFlippers = True
         if 'config' in sys.argv:
+            xbox._start_thread = True
             if xbox.wait_for_connection():
                 print("Could not connect to xbox controller")
                 return
@@ -394,6 +503,7 @@ def main():
             return
         if 'debug' in sys.argv:
             print("Waiting for xbox to connect")
+            xbox._start_thread = True
             if xbox.wait_for_connection():
                 print("Could not connect to xbox controller")
                 return
@@ -430,10 +540,7 @@ def main():
             
         print("Usage: run.py [mock]")
     
-    if xbox.wait_for_connection():
-        asyncio.run(control(xbox, mockFlippers))
-    else:
-        print("Could not connect to xbox controller")
+    asyncio.run(control(xbox, mockFlippers))
     
 
 
