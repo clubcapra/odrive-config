@@ -9,17 +9,18 @@ import struct
 import threading
 import time
 from time import sleep
-from typing import List, Dict, Sequence, Tuple, Literal, Union
+from typing import Generic, List, Dict, Protocol, Sequence, Tuple, Literal, TypeVar, Union
 from asyncio import gather
 
 import prompt_toolkit.completion
 import prompt_toolkit.contrib
 import prompt_toolkit.contrib.completers
 import prompt_toolkit.contrib.regular_languages
+import prompt_toolkit.utils
 import prompt_toolkit.validation
 
 from can_simple_utils import GET_ENCODER_ESTIMATES_CMD, CanSimpleNode
-from xbox_controller import ControllerBindings, XboxController
+from xbox_controller import Axis, Button, ControllerBindings, XboxController
 
 import prompt_toolkit
 
@@ -58,7 +59,7 @@ def estop_monitor(nodes: List[CanSimpleNode], bus: can.BusABC, heartbeat: thread
                 node.call_estop()
 
 
-def msg_monitor(nodes: List[CanSimpleNode], flippers: Dict[Pos, Flipper], bus: can.BusABC) -> None:
+def msg_monitor(nodes: List[CanSimpleNode], flippers: Dict[Pos, Flipper], posEvents: Dict[Pos, threading.Event], bus: can.BusABC) -> None:
     """Listens for node errors and triggers E-Stop if any occur."""
     while True:
         msg = bus.recv()
@@ -74,10 +75,12 @@ def msg_monitor(nodes: List[CanSimpleNode], flippers: Dict[Pos, Flipper], bus: c
             elif (msg.arbitration_id & GET_ENCODER_ESTIMATES_CMD) == 0x01:
                 pos, vel = struct.unpack('<ff', msg.data)
                 nid = msg.arbitration_id >> 5
-                for f in flippers.values():
+                for n, f in flippers.items():
                     if f.node.node_id == nid:
                         f._position = pos
                         f._velocity = vel
+                        print(f"{nid} pos: {pos} vel: {vel}")
+                        posEvents[n].set()
         
 
 def clamp(val:float, lo:float=-1.0, hi:float=1.0) -> float:
@@ -149,6 +152,227 @@ def select_bindings(controller: XboxController):
             data = json.load(rd)
             controller.load_bindings(ControllerBindings.load(data))
 
+U = TypeVar('U', covariant=True)
+class MultiContext(Generic[U]):
+    def __init__(self, contexts: List[U]):
+        self.contexts = contexts
+        
+    def __enter__(self) -> List[U]:
+        res = []
+        for c in self.contexts:
+            res.append(c.__enter__()) # type: ignore
+        return res
+        
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        for c in self.contexts:
+            c.__exit__(exc_type, exc_val, exc_tb) # type: ignore
+
+async def read_loop(reader: can.AsyncBufferedReader, nodes: List[CanSimpleNode]):
+    async for msg in reader:
+        for n in nodes:
+            n.read_msg(msg)
+
+async def read_positions_loop(nodes: List[CanSimpleNode]):
+    i = 0
+    while True:
+        if i % 10 == 0:
+            for n in nodes:
+                n.get_encoder_estimates_msg()
+                print(f'{n.node_id}: pos: {str(round(n.position, 2)).ljust(6)} vel: {str(round(n.velocity, 2)).ljust(6)}')
+            i = 0
+        await asyncio.sleep(MAIN_LOOP_INTERVAL)
+        i+=1    
+
+def read_positions():
+    with init_can_bus() as bus:
+        reader = can.AsyncBufferedReader()
+        tracks, flippers = create_nodes(bus)
+        all_nodes: List[CanSimpleNode] = tracks['left'] + tracks['right'] + list(flippers.values())
+        # with MultiContext(all_nodes):
+        async def run():
+            notifier = can.Notifier(bus, [reader], loop=asyncio.get_running_loop())
+            with MultiContext([]):
+                try:
+                    while True:
+                        await asyncio.gather(read_positions_loop(all_nodes), read_loop(reader, all_nodes))
+                except KeyboardInterrupt:
+                    print("[INFO] KeyboardInterrupt: E-Stopping all nodes.")
+
+                finally:
+                    print("Application exited")
+        asyncio.run(run())
+
+async def load_flippers_delay(flipper_devs: Dict[Pos, Flipper]):
+    await asyncio.sleep(5)
+    load_flippers(flipper_devs)
+    
+
+async def control_main_loop(xbox: XboxController,
+                            mockFlippers: bool, 
+                            heartbeat: threading.Event, 
+                            all_nodes: List[CanSimpleNode], 
+                            flippers: Dict[Pos, CanSimpleNode],
+                            tracks: Dict[Side, List[CanSimpleNode]],
+                            flipper_devs: Dict[Pos, Flipper]):
+    
+    
+    drive_enabled = False
+    error_cleared = False
+    while True:
+        heartbeat.set()
+
+        # E-Stop: bumpers
+        if xbox.LeftBumper.state or xbox.RightBumper.state:
+            for node in all_nodes:
+                node.call_estop()
+            drive_enabled = False
+
+        # Toggle drive enable: A button
+        if xbox.A.state and not drive_enabled:
+            for node in all_nodes:
+                node.set_state_msg(CLOSED_LOOP_CONTROL)
+            drive_enabled = True
+        elif (not xbox.A.state or not xbox.Connected) and drive_enabled:
+            for node in all_nodes:
+                node.set_state_msg(IDLE)
+            drive_enabled = False
+
+        # Clear errors: B button
+        if xbox.B.state and not error_cleared:
+            for node in all_nodes:
+                node.clear_errors_msg()
+            error_cleared = True
+        elif not xbox.B.state:
+            error_cleared = False
+
+        for f in flipper_devs.values():
+            f.update()
+        for f in flipper_devs.values():
+            f.run()
+            
+            
+        if mockFlippers:
+            for f in flippers.values():
+                f.update() # type: ignore
+            
+        if not mockFlippers:
+            handle_tracks(xbox, tracks, drive_enabled)
+            for name, flipper1 in flipper_devs.items():
+                shortName = ''.join([n[0] for n in name.split('_')]).upper()
+                values: Dict[str, float] = {
+                    '_p': flipper1._position,
+                    '_s': flipper1._setPosition,
+                    'P': flipper1.position,
+                    'S': flipper1.setPosition,
+                    '_v': flipper1._velocity,
+                    '_z': flipper1._zero,
+                }
+                fields = [f'{n}:{str(round(v, 3)).ljust(8)}' for n, v in values.items()]
+                print(f'{shortName}: {"|".join(fields)}')
+        else:
+            print()
+            for name, flipper in flipper_devs.items():
+                shortName = ''.join([n[0] for n in name.split('_')]).upper()
+                values: Dict[str, float] = {
+                    '_p': flipper._position,
+                    '_s': flipper._setPosition,
+                    'P': flipper.position,
+                    'S': flipper.setPosition,
+                    '_v': flipper._velocity,
+                    '_z': flipper._zero,
+                }
+                fields = [f'{n}:{str(round(v, 3)).ljust(8)}' for n, v in values.items()]
+                print(f'{shortName}: {"|".join(fields)}')
+
+        await asyncio.sleep(MAIN_LOOP_INTERVAL)
+
+async def control(xbox: XboxController, mockFlippers: bool):
+    with MultiContext([]) if mockFlippers else init_can_bus() as ctx:
+        if not mockFlippers:
+            bus:can.BusABC = ctx # type: ignore
+            tracks, flippers = create_nodes(bus)
+            all_nodes = tracks['left'] + tracks['right'] + list(flippers.values())
+            reader = can.AsyncBufferedReader()
+            notifier = can.Notifier(
+                bus,
+                [reader],
+                loop=asyncio.get_event_loop()
+            )
+        else:
+            tracks:Dict[Side, List[CanSimpleNode]] = {side: list([FakeFlipper(58, 10) for _ in range(2)]) for side in ['left', 'right']}
+            flippers: Dict[Pos, CanSimpleNode] = {
+                'front_left' : FakeFlipper(58, 10),
+                'rear_left' : FakeFlipper(58, 9),
+                'front_right' : FakeFlipper(55, 10),
+                'rear_right' : FakeFlipper(55, 9),
+            }
+            all_nodes = tracks['left'] + tracks['right'] + list(flippers.values())
+        flipper_devs: Dict[Pos, Flipper] = {name: Flipper(node) for name, node in flippers.items()}
+        frontInstruction = PairInstruction(xbox, 'front')
+        rearInstruction = PairInstruction(xbox, 'rear')
+        allIstruction = AllInstruction(xbox)
+        for pos, flipper in flipper_devs.items():
+            flipper.addInstruction(allIstruction)
+            flipper.addInstruction(SingleInstruction(xbox, pos))
+            if pos.startswith('front'):
+                flipper.addInstruction(frontInstruction)
+            else:
+                flipper.addInstruction(rearInstruction)
+        
+        heartbeat = threading.Event()
+        if not mockFlippers:
+            threading.Thread(target=estop_monitor, args=(all_nodes, bus, heartbeat), daemon=True).start()
+            # threading.Thread(target=msg_monitor, args=(all_nodes, flipper_devs, posEvents, bus), daemon=True).start()
+
+        for node in all_nodes:
+            node.clear_errors_msg()
+            node.set_state_msg(IDLE)
+
+        async def onExit(): # TODO Fix this. It wont work because the read_loop is stopped
+            if not mockFlippers:
+                print("DO NOT KILL THE PROGRAM SAVING FLIPPER POSITIONS IN 3 SECCONDS!!!")
+                for node in all_nodes:
+                    node.call_estop()
+                await asyncio.sleep(3)
+                try:
+                    await asyncio.wait([read_loop(reader, all_nodes)], timeout=1)
+                except asyncio.TimeoutError:
+                    pass
+                
+                save_flippers(flipper_devs)
+
+        try:
+            async with OnExit(onExit):
+                while True:
+                    if mockFlippers:
+                        await asyncio.gather(
+                            control_main_loop(xbox,
+                                            mockFlippers,
+                                            heartbeat,
+                                            all_nodes,
+                                            flippers,
+                                            tracks,
+                                            flipper_devs),
+                        )
+                    else:
+                        await asyncio.gather(
+                            read_loop(reader, all_nodes),
+                            control_main_loop(xbox,
+                                            mockFlippers,
+                                            heartbeat,
+                                            all_nodes,
+                                            flippers,
+                                            tracks,
+                                            flipper_devs),
+                            load_flippers_delay(flipper_devs),
+                        )
+
+        except KeyboardInterrupt:
+            print("[INFO] KeyboardInterrupt: E-Stopping all nodes.")
+
+        finally:
+            print("Application exited")
+
 def main():
     mockFlippers = False
     xbox = XboxController()
@@ -156,126 +380,56 @@ def main():
         if 'mock' in sys.argv:
             mockFlippers = True
         if 'config' in sys.argv:
+            if xbox.wait_for_connection():
+                print("Could not connect to xbox controller")
+                return
             select_bindings(xbox)
+        if 'read' in sys.argv:
+            read_positions()
+            return
+        if 'debug' in sys.argv:
+            print("Waiting for xbox to connect")
+            if xbox.wait_for_connection():
+                print("Could not connect to xbox controller")
+                return
+            while True:
+                actions = {
+                    'LS X' : xbox.LeftJoystickX,
+                    'LS Y' : xbox.LeftJoystickY,
+                    'LT' : xbox.LeftTrigger,
+                    'RT' : xbox.RightTrigger,
+                    'LB' : xbox.LeftBumper,
+                    'RB' : xbox.RightBumper,
+                    'A' : xbox.A,
+                    'X' : xbox.X,
+                    'Y' : xbox.Y,
+                    'B' : xbox.B,
+                    'LS' : xbox.LeftThumb,
+                    'RS' : xbox.RightThumb,
+                    'Back' : xbox.Back,
+                    'Start' : xbox.Start,
+                    'Left' : xbox.LeftDPad,
+                    'Right' : xbox.RightDPad,
+                    'Up' : xbox.UpDPad,
+                    'Down' : xbox.DownDPad,
+                }
+                fields = []
+                print()
+                for name, action in actions.items():
+                    if isinstance(action, Axis):
+                        print(f'{name} raw: {str(action.raw).zfill(5)} actual: {str(round(action.value, 3)).zfill(6)}')
+                    if isinstance(action, Button):
+                        fields.append(f'{name}:{1 if action.state else 0}')
+                print('|'.join(fields))
+                sleep(0.5)
             
         print("Usage: run.py [mock]")
-        
-    if not mockFlippers:
-        bus = init_can_bus()
-        tracks, flippers = create_nodes(bus)
-        all_nodes = tracks['left'] + tracks['right'] + list(flippers.values())
-    else:
-        tracks:Dict[Side, List[CanSimpleNode]] = {side: list([FakeFlipper(58, 10) for _ in range(2)]) for side in ['left', 'right']}
-        flippers: Dict[Pos, CanSimpleNode] = {
-            'front_left' : FakeFlipper(58, 10),
-            'rear_left' : FakeFlipper(58, 9),
-            'front_right' : FakeFlipper(55, 10),
-            'rear_right' : FakeFlipper(55, 9),
-        }
-        all_nodes = tracks['left'] + tracks['right'] + list(flippers.values())
-    flipper_devs: Dict[Pos, Flipper] = {name: Flipper(node) for name, node in flippers.items()}
-    frontInstruction = PairInstruction(xbox, 'front')
-    rearInstruction = PairInstruction(xbox, 'rear')
-    allIstruction = AllInstruction(xbox)
-    for pos, flipper in flipper_devs.items():
-        flipper.addInstruction(allIstruction)
-        flipper.addInstruction(SingleInstruction(xbox, pos))
-        if pos.startswith('front'):
-            flipper.addInstruction(frontInstruction)
-        else:
-            flipper.addInstruction(rearInstruction)
-    load_flippers(flipper_devs)
     
-    posEvents: Dict[Pos, threading.Event] = {name: threading.Event() for name in flippers.keys()}
-
-    heartbeat = threading.Event()
-    if not mockFlippers:
-        threading.Thread(target=estop_monitor, args=(all_nodes, bus, heartbeat), daemon=True).start()
-        threading.Thread(target=msg_monitor, args=(all_nodes, flipper_devs, posEvents, bus), daemon=True).start()
-
-    for node in all_nodes:
-        node.clear_errors_msg()
-        node.set_state_msg(IDLE)
-
-    drive_enabled = False
-    error_cleared = False
-
-    def onExit():
-        if not mockFlippers:
-            for node in all_nodes:
-                node.call_estop()
-            sleep(3)
-            for event in posEvents.values():
-                event.clear()
-            for name, event in posEvents.items():
-                if not event.wait(1.0):
-                    prompt_toolkit.print_formatted_text(f"<ansired>ERROR unable to save flipper {name}!</ansired>")
-            save_flippers(flipper_devs)
-
-    try:
-        with OnExit(onExit):
-            while True:
-                heartbeat.set()
-
-                # E-Stop: bumpers
-                if xbox.LeftBumper.state or xbox.RightBumper.state:
-                    for node in all_nodes:
-                        node.call_estop()
-                    drive_enabled = False
-
-                # Toggle drive enable: A button
-                if xbox.A.state and not drive_enabled:
-                    for node in all_nodes:
-                        node.set_state_msg(CLOSED_LOOP_CONTROL)
-                    drive_enabled = True
-                elif (not xbox.A.state or not xbox.Connected) and drive_enabled:
-                    for node in all_nodes:
-                        node.set_state_msg(IDLE)
-                    drive_enabled = False
-
-                # Clear errors: B button
-                if xbox.B.state and not error_cleared:
-                    for node in all_nodes:
-                        node.clear_errors_msg()
-                    error_cleared = True
-                elif not xbox.B.state:
-                    error_cleared = False
-
-                for f in flipper_devs.values():
-                    f.update()
-                for f in flipper_devs.values():
-                    f.run()
-                    
-                if mockFlippers:
-                    for f in flippers.values():
-                        f.update() # type: ignore
-                    
-                if not mockFlippers:
-                    handle_tracks(xbox, tracks, drive_enabled)
-                else:
-                    print()
-                    for name, flipper in flipper_devs.items():
-                        shortName = ''.join([n[0] for n in name.split('_')]).upper()
-                        values: Dict[str, float] = {
-                            '_p': flipper._position,
-                            '_s': flipper._setPosition,
-                            'P': flipper.position,
-                            'S': flipper.setPosition,
-                            '_v': flipper._velocity,
-                            '_z': flipper._zero,
-                        }
-                        fields = [f'{n}:{str(round(v, 3)).ljust(8)}' for n, v in values.items()]
-                        print(f'{shortName}: {"|".join(fields)}')
-
-                sleep(MAIN_LOOP_INTERVAL)
-
-    except KeyboardInterrupt:
-        print("[INFO] KeyboardInterrupt: E-Stopping all nodes.")
-
-    finally:
-        if not mockFlippers:
-            bus.shutdown()
-        print("Application exited")
+    if xbox.wait_for_connection():
+        asyncio.run(control(xbox, mockFlippers))
+    else:
+        print("Could not connect to xbox controller")
+    
 
 
 if __name__ == '__main__':

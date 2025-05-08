@@ -1,10 +1,10 @@
 from __future__ import annotations
-from asyncio import wait
+from asyncio import iscoroutine, wait
 import asyncio
 from datetime import datetime
 from pathlib import Path
 from statistics import mean
-from typing import Callable, Dict, Generic, Iterable, Optional, Sequence, Tuple, TypeAlias
+from typing import Awaitable, Callable, Coroutine, Dict, Generic, Iterable, Optional, Sequence, Tuple, TypeAlias
 import typing
 import can
 from typing_extensions import override
@@ -32,15 +32,14 @@ class FakeFlipper(CanSimpleNode):
     def __init__(self, maxVelocity: float, maxAcceleration: float):
         self._maxVelocity = maxVelocity
         self._maxAcceleration = maxAcceleration
-        self._position: float = 0.0
-        self._velocity: float = 0.0
+        self.position: float = 0.0
+        self.velocity: float = 0.0
         self._setPosition: float = 0.0
         self._lastUpdate: Optional[datetime] = None
         self.enable = False
         self.connected: bool = False
 
     def __enter__(self) -> CanSimpleNode:
-
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -62,10 +61,10 @@ class FakeFlipper(CanSimpleNode):
         deltaTime = now - self._lastUpdate
         self._lastUpdate = now
         
-        if self._position < self._setPosition:
-            self._position = min(self._setPosition, self._position + self._maxVelocity * deltaTime.total_seconds())
-        elif self._position > self._setPosition:
-            self._position = max(self._setPosition, self._position - self._maxVelocity * deltaTime.total_seconds())
+        if self.position < self._setPosition:
+            self.position = min(self._setPosition, self.position + self._maxVelocity * deltaTime.total_seconds())
+        elif self.position > self._setPosition:
+            self.position = max(self._setPosition, self.position - self._maxVelocity * deltaTime.total_seconds())
             
 
     def clear_errors_msg(self, identify: bool = False) -> None:
@@ -90,7 +89,7 @@ class FakeFlipper(CanSimpleNode):
         return True
 
     def set_velocity(self, vel: float) -> None:
-        self._velocity = vel
+        self.velocity = vel
 
     def set_position(self, pos: float, vel_feedforward: float = 0.0, torque_feedforward: float = 0.0) -> None:
         self._setPosition = pos
@@ -104,7 +103,7 @@ class FakeFlipper(CanSimpleNode):
         pass
 
     async def get_encoder_estimates(self, timeout: float=1.0) -> Tuple[float, float]:
-        return self._position, self._velocity
+        return self.position, self.velocity
 
     def get_temperature_msg(self) -> None:
         pass
@@ -204,6 +203,7 @@ class SingleInstruction(Instruction):
         
         self.singleControl = StateBool()
         self.convergeControl = StateBool()
+        self.zeroControl = StateBool()
         
     def update(self):
         self.offset = self.flippers[0].position - (self.flippers[0].setPosition - self.setOffset)
@@ -252,8 +252,10 @@ class SingleInstruction(Instruction):
             self.setOffset = self.offset
             
         # Zero
-        if selected and self.controller.LeftDPad and not self.controller.A.state:
+        self.zeroControl.state = selected and self.controller.LeftDPad.state and not self.controller.A.state
+        if self.zeroControl.latched:
             self.flippers[0].zero()
+            print(f"Set zero for {self.pos} (at {self.flippers[0]._position})")
             
         return self.setOffset
     
@@ -333,10 +335,16 @@ class Flipper:
     def __init__(self, node: CanSimpleNode):
         self.node = node
         self._zero: float = 0.0
-        self._position: float = 0.0
-        self._velocity: float = 0.0
         self._setPosition: float = 0.0
         self.instructions: List[Instruction] = []
+
+    @property
+    def _position(self) -> float:
+        return self.node.position
+    
+    @property
+    def _velocity(self) -> float:
+        return self.node.velocity
     
     def addInstruction(self, instruction:Instruction):
         self.instructions.append(instruction)
@@ -347,7 +355,13 @@ class Flipper:
         return self._position - self._zero
 
     def _sendPosition(self):
-        self.node.set_position(self._setPosition)
+        speed = 0
+        delta = self._setPosition - self._position
+        if abs(delta) > 0.5:
+            speed = max(0.5, min(30, abs(delta)*2))
+        if delta < 0:
+            speed = -speed
+        self.node.set_position(self._setPosition, speed, 1)
 
     @property
     def setPosition(self) -> float:
@@ -385,7 +399,7 @@ def load_flippers(flippers: Dict[str, Flipper]):
             print("No data")
             return
         for name, zero in data.items():
-            flippers[name]._zero = -zero
+            flippers[name]._zero = flippers[name]._position - zero
         
 def save_flippers(flippers: Dict[str, Flipper]):
     data: Dict[str, float] = dict()
@@ -397,7 +411,7 @@ def save_flippers(flippers: Dict[str, Flipper]):
         wr.flush() # Just as a safety measure
 
 class OnExit():
-    def __init__(self, func:Callable[..., None], *args, **kwargs):
+    def __init__(self, func:Union[Callable[..., None], Callable[..., Coroutine]], *args, **kwargs):
         self.func = func
         self.args = args
         self.kwargs = kwargs
@@ -407,3 +421,9 @@ class OnExit():
     
     def __exit__(self, _, __, ___):
         self.func(*self.args, **self.kwargs)
+        
+    async def __aenter__(self) -> OnExit:
+        return self
+    
+    async def __aexit__(self, _, __, ___):
+        await self.func(*self.args, **self.kwargs)

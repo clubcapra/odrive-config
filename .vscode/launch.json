@@ -19,6 +19,22 @@
             "request": "launch",
             "program": "run.py",
             "console": "integratedTerminal",
+        },
+        {
+            "name": "Python Debugger: run.py debug",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "run.py",
+            "console": "integratedTerminal",
+            "args": "debug"
+        },
+        {
+            "name": "Python Debugger: run.py read",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "run.py",
+            "console": "integratedTerminal",
+            "args": "read"
         }
     ]
 }

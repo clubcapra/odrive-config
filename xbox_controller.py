@@ -1,9 +1,12 @@
 from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
+import datetime
 import math
 from re import S
+from statistics import mean
 import threading
+from time import sleep
 from typing import Any, Callable, Dict, Optional, Tuple, overload
 import evdev
 import json
@@ -18,7 +21,8 @@ import prompt_toolkit.utils
 import prompt_toolkit.widgets
 
 MAX_TRIG_VAL = 1_023
-MAX_JOY_VAL = 32_768
+# MAX_JOY_VAL = 32_768
+MAX_JOY_VAL = 65_535
 
 def mapValue(fromMin, fromMax, toMin, toMax, value) -> float:
     return (value - fromMin) / (fromMax - fromMin) * (toMax - toMin) + toMin
@@ -46,10 +50,10 @@ class Binding:
     
 @dataclass
 class ControllerBindings:
-    LeftJoystickY: Binding = Binding(evdev.ecodes.EV_ABS, evdev.ecodes.ABS_Y, MAX_JOY_VAL, -MAX_JOY_VAL, True)
-    LeftJoystickX: Binding = Binding(evdev.ecodes.EV_ABS, evdev.ecodes.ABS_X, -MAX_JOY_VAL, MAX_JOY_VAL, True)
-    RightJoystickY: Binding = Binding(evdev.ecodes.EV_ABS, evdev.ecodes.ABS_RY, MAX_JOY_VAL, -MAX_JOY_VAL, True)
-    RightJoystickX: Binding = Binding(evdev.ecodes.EV_ABS, evdev.ecodes.ABS_RX, -MAX_JOY_VAL, MAX_JOY_VAL, True)
+    LeftJoystickY: Binding = Binding(evdev.ecodes.EV_ABS, evdev.ecodes.ABS_Y, MAX_JOY_VAL, 0, True)
+    LeftJoystickX: Binding = Binding(evdev.ecodes.EV_ABS, evdev.ecodes.ABS_X, 0, MAX_JOY_VAL, True)
+    RightJoystickY: Binding = Binding(evdev.ecodes.EV_ABS, evdev.ecodes.ABS_RY, MAX_JOY_VAL, 0, True)
+    RightJoystickX: Binding = Binding(evdev.ecodes.EV_ABS, evdev.ecodes.ABS_RX, 0, MAX_JOY_VAL, True)
     # LeftTrigger: Binding = Binding(evdev.ecodes.EV_ABS, evdev.ecodes.ABS_RZ, 0, MAX_TRIG_VAL)
     # RightTrigger: Binding = Binding(evdev.ecodes.EV_ABS, evdev.ecodes.ABS_Z, 0, MAX_TRIG_VAL)
     LeftTrigger: Binding = Binding(evdev.ecodes.EV_ABS, evdev.ecodes.ABS_BRAKE, 0, MAX_TRIG_VAL)
@@ -59,8 +63,8 @@ class ControllerBindings:
     LeftBumper: Binding = Binding(evdev.ecodes.EV_KEY, evdev.ecodes.BTN_TL)
     RightBumper: Binding = Binding(evdev.ecodes.EV_KEY, evdev.ecodes.BTN_TR)
     A: Binding = Binding(evdev.ecodes.EV_KEY, evdev.ecodes.BTN_SOUTH)
-    X: Binding = Binding(evdev.ecodes.EV_KEY, evdev.ecodes.BTN_WEST)
-    Y: Binding = Binding(evdev.ecodes.EV_KEY, evdev.ecodes.BTN_NORTH)
+    X: Binding = Binding(evdev.ecodes.EV_KEY, evdev.ecodes.BTN_NORTH)
+    Y: Binding = Binding(evdev.ecodes.EV_KEY, evdev.ecodes.BTN_WEST)
     B: Binding = Binding(evdev.ecodes.EV_KEY, evdev.ecodes.BTN_EAST)
     LeftThumb: Binding = Binding(evdev.ecodes.EV_KEY, evdev.ecodes.BTN_THUMBL)
     RightThumb: Binding = Binding(evdev.ecodes.EV_KEY, evdev.ecodes.BTN_THUMBR)
@@ -110,10 +114,13 @@ class Button:
         if event.type == self.binding.etype and event.code == self.binding.ecode:
             self.raw = event.value
 
+    def __bool__(self) -> bool:
+        return self.state
+
 class Axis:
     def __init__(self, binding:Binding = Binding(), valueMin:float = -1.0, valueMax:float = 1.0):
         self.binding = binding
-        self.raw = 0
+        self.raw = -1
         self.valueMin = valueMin
         self.valueMax = valueMax
         self.deadzone = 0.1
@@ -128,11 +135,16 @@ class Axis:
         
     @property
     def value(self) -> float:
+        if self.raw == -1:
+            return mean([self.valueMin, self.valueMax])
         return self._apply_deadzone(mapValue(self.binding.minValue, self.binding.maxValue, self.valueMin, self.valueMax, self.raw))
     
     def update(self, event:evdev.InputEvent):
         if event.type == self.binding.etype and event.code == self.binding.ecode:
             self.raw = event.value
+    
+    def __float__(self) -> float:
+        return self.value
     
 class XboxController(object):
     """
@@ -171,28 +183,37 @@ class XboxController(object):
         """
         Initializes the XboxController object and starts the monitoring thread.
         """
-        devices = [evdev.InputDevice(path) for path in evdev.list_devices()]
-        self.device_path = ""
-        for device in devices:
-            if device.name in ["Xbox Wireless Controller", "Microsoft Xbox Series S|X Controller"]:
-                self.device_path = device.path
-                break
-
-        if self.device_path == "":
-            print("Controller disconnected. Exiting the controller monitor thread.")
-            self.Connected = False
-            return
-
-        self.device:evdev.InputDevice = evdev.InputDevice(self.device_path)
-
-        
         self.load_bindings(bindings)
         self.Connected = False
+        self._monitor_thread = None
+        self.connect()
 
-        self._monitor_thread = threading.Thread(target=self._monitor_controller, args=())
-        self._monitor_thread.daemon = True
-        self._monitor_thread.start()
+        
+
         print("Started XBox controller manager")
+
+    def connect(self):
+            
+        if not self.Connected:
+            devices = [evdev.InputDevice(path) for path in evdev.list_devices()]
+            self.device_path = ""
+            for device in devices:
+                if device.name in ["Xbox Wireless Controller", "Microsoft Xbox Series S|X Controller"]:
+                    self.device_path = device.path
+                    break
+
+            if self.device_path == "":
+                print("Controller disconnected. Exiting the controller monitor thread.")
+                self.Connected = False
+                return False
+
+            self.device:evdev.InputDevice = evdev.InputDevice(self.device_path)
+            
+        if self._monitor_thread is None or not self._monitor_thread.is_alive():
+            self._monitor_thread = threading.Thread(target=self._monitor_controller, args=())
+            self._monitor_thread.daemon = True
+            self._monitor_thread.start()
+        return True
 
     def load_bindings(self, bindings:ControllerBindings):
         self.bindings = bindings
@@ -265,7 +286,7 @@ class XboxController(object):
                 if val == event.code:
                     if ecode.startswith(prefix):
                         break
-            return prompt_toolkit.shortcuts.confirm("Input detected", f"Found etype: {etype} ecode: {ecode}")
+            return prompt_toolkit.shortcuts.confirm("Input detected", f"Found etype: {etype} ecode: {ecode} value: {event.value}")
         
         def wait_for_btn(restrict:bool = False) -> Optional[evdev.InputEvent]:
             for event in self.device.read_loop():
@@ -365,7 +386,11 @@ class XboxController(object):
             
         self.load_bindings(self.bindings)
             
-            
+    def wait_for_connection(self):
+        timeout = datetime.datetime.now() + datetime.timedelta(seconds=5)
+        while timeout > datetime.datetime.now() and not self.connect():
+            sleep(0.1)
+        return self.Connected
     
     def _monitor_controller(self):
         """
