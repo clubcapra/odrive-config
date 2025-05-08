@@ -1,34 +1,16 @@
 from __future__ import annotations
 # 100% from https://github.com/odriverobotics/ODriveResources/blob/master/examples/can_simple_utils.py
 import asyncio
-from enum import Enum
+from datetime import datetime, timedelta
 import can
 import struct
 
 from typing import Tuple
-from common import IDLE
+from common import *
 from odrive_error_codes import get_error_description
 
 
-ESTOP_CMD = 0x002
-HEARTBEAT_CMD = 0x001
-GET_ERROR_CMD = 0x003
 
-ADDRESS_CMD = 0x06
-SET_AXIS_STATE_CMD = 0x07
-REBOOT_CMD = 0x16
-CLEAR_ERRORS_CMD = 0x18
-SET_INPUT_POS_CMD = 0x0C  # Set_Input_Pos command ID
-GET_ENCODER_ESTIMATES_CMD = 0x09
-GET_TEMPERATURE_CMD = 0x15
-GET_BUS_VOLTAGE_CURRENT_CMD = 0x17
-GET_POWERS_CMD = 0x1D
-GET_TORQUES_CMD = 0x1C
-    
-
-REBOOT_ACTION_REBOOT = 0
-REBOOT_ACTION_SAVE = 1
-REBOOT_ACTION_ERASE = 2
 
 class CanSimpleNode():
     def __init__(self, bus: can.BusABC, node_id: int):
@@ -36,16 +18,22 @@ class CanSimpleNode():
         self.node_id: int = node_id
         self.reader: can.AsyncBufferedReader = can.AsyncBufferedReader()
         self.connected: bool = False
-        self.position = 0.0
+        self._position = 0.0
         self.velocity = 0.0
         self.torque = 0.0
         self.error = 0
+        self._lastError = 0
+        self._nextPrint = datetime.now()
         self.disarmReason = 0
-        self.state = IDLE
+        self.state = STATE_IDLE
         self.current = 0.0
         self.voltage = 0.0
         self.fetTemperature = 0.0
         self.motorTemperature = 0.0
+
+    @property
+    def position(self) -> float:
+        return self._position
 
     def __enter__(self) -> CanSimpleNode:
         self.notifier = can.Notifier(
@@ -73,7 +61,7 @@ class CanSimpleNode():
             return
         cmd_id = msg.arbitration_id & 0b11111
         if cmd_id == GET_ENCODER_ESTIMATES_CMD:
-            self.position, self.velocity = struct.unpack('<ff', msg.data)
+            self._position, self.velocity = struct.unpack('<ff', msg.data)
             # print(f'{nid} {self.node_id}: pos:{self.position} vel:{self.velocity}')
         elif cmd_id == GET_BUS_VOLTAGE_CURRENT_CMD:
             self.voltage, self.current = struct.unpack('<ff', msg.data)
@@ -107,8 +95,12 @@ class CanSimpleNode():
         ))
 
     def getErrorDescription(self, error_code: int):
-        desc = get_error_description(error_code)
-        print(f"CAN {self.node_id} Error Code: {error_code} - {desc}")
+        now = datetime.now()
+        if self._lastError != self.error or self._nextPrint <= now:
+            desc = get_error_description(error_code)
+            print(f"CAN {self.node_id} Error Code: {error_code} - {desc}")
+            self._nextPrint = now + timedelta(seconds=1)
+        self._lastError = self.error
         self.clear_errors_msg()
 
     def set_state_msg(self, state: int):
@@ -136,7 +128,15 @@ class CanSimpleNode():
     def set_velocity(self, vel: float) -> None:
         payload = struct.pack('<ff', vel, 0.0)
         self.bus.send(can.Message(
-            arbitration_id=(self.node_id << 5) | 0x0D,  # Set_Input_Vel
+            arbitration_id=(self.node_id << 5) | SET_INPUT_VEL_CMD,  # Set_Input_Vel
+            data=payload,
+            is_extended_id=False
+        ))
+
+    def set_traj_vel_limit(self, vel: float) -> None:
+        payload = struct.pack('<f', vel)
+        self.bus.send(can.Message(
+            arbitration_id=(self.node_id << 5) | SET_TRAJ_VEL_LIMIT_CMD,
             data=payload,
             is_extended_id=False
         ))

@@ -257,6 +257,7 @@ class SingleInstruction(Instruction):
             self.flippers[0].zero()
             print(f"Set zero for {self.pos} (at {self.flippers[0]._position})")
             
+        
         return self.setOffset
     
 class PairInstruction(Instruction):
@@ -301,7 +302,7 @@ class PairInstruction(Instruction):
             self.setOffset = 0
         if self.convergeControl.unlatched:
             self.setOffset = self.offset
-            
+        
         return self.setOffset
             
 class AllInstruction(Instruction):
@@ -329,6 +330,7 @@ class AllInstruction(Instruction):
                 self.setOffset = self.offset + FLIPPER_MOVE_OFFSET
         if self.active.unlatched:
             self.setOffset = self.offset
+            
         return self.setOffset
     
 class Flipper:
@@ -362,12 +364,18 @@ class Flipper:
 
     def _sendPosition(self):
         speed = 0
+        torque = 0
         delta = self._setPosition - self._position
-        if abs(delta) > 0.5:
-            speed = max(0.5, min(30, abs(delta)*2))
-        if delta < 0:
-            speed = -speed
-        self.node.set_position(self._setPosition, speed, 1)
+        if abs(delta) > 2:
+            speed = -max(0.1, min(10, abs(delta)*2))
+            torque = 1
+        # if delta < 0:
+        #     speed = -speed
+        #     torque = -torque
+        # self.node.set_position(self._setPosition, speed, torque)
+        self.node.set_position(self._setPosition)
+        if self.node.node_id == 13:
+            print(f'delta: {niceFloat(delta)}, setpos: {niceFloat(self._setPosition)}, speed: {niceFloat(speed)}, torque: {niceFloat(torque)}')
 
     @property
     def setPosition(self) -> float:
@@ -419,6 +427,7 @@ def save_flippers(flippers: Dict[str, Flipper]):
     with FLIPPER_OFFSETS_PATH.open('w') as wr:
         dump(data, wr)
         wr.flush() # Just as a safety measure
+        print("Saved positions")
 
 class OnExit():
     def __init__(self, func:Union[Callable[..., None], Callable[..., Coroutine]], *args, **kwargs):

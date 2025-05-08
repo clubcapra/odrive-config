@@ -92,8 +92,8 @@ def handle_tracks(controller: XboxController, tracks: Dict[Side, List[CanSimpleN
     Left stick X = throttle, Left stick Y = steering.
     """
     if enabled:
-        throttle = -clamp(controller.LeftJoystickX.value)
-        steering = clamp(controller.LeftJoystickY.value)
+        throttle = -clamp(controller.LeftJoystickY.value)
+        steering = -clamp(controller.LeftJoystickX.value)
         left_cmd  = throttle + steering
         right_cmd = throttle - steering
     else:
@@ -227,11 +227,11 @@ async def control_main_loop(xbox: XboxController,
         # Toggle drive enable: A button
         if xbox.A.state and not drive_enabled:
             for node in all_nodes:
-                node.set_state_msg(CLOSED_LOOP_CONTROL)
+                node.set_state_msg(STATE_CLOSED_LOOP_CONTROL)
             drive_enabled = True
         elif (not xbox.A.state or not xbox.Connected) and drive_enabled:
             for node in all_nodes:
-                node.set_state_msg(IDLE)
+                node.set_state_msg(STATE_IDLE)
             drive_enabled = False
 
         # Clear errors: B button
@@ -255,6 +255,8 @@ async def control_main_loop(xbox: XboxController,
         if not mockFlippers:
             handle_tracks(xbox, tracks, drive_enabled)
             for name, flipper1 in flipper_devs.items():
+                if name != 'front_right':
+                    continue
                 shortName = ''.join([n[0] for n in name.split('_')]).upper()
                 values: Dict[str, float] = {
                     '_p': flipper1._position,
@@ -323,7 +325,7 @@ async def control(xbox: XboxController, mockFlippers: bool):
 
         for node in all_nodes:
             node.clear_errors_msg()
-            node.set_state_msg(IDLE)
+            node.set_state_msg(STATE_IDLE)
         load_flippers(flipper_devs)
 
         async def onExit():
@@ -345,6 +347,8 @@ async def control(xbox: XboxController, mockFlippers: bool):
 
         try:
             async with OnExit(onExit):
+                for flipper in flippers.values():
+                    flipper.set_traj_vel_limit(58)
                 while True:
                     if mockFlippers:
                         await asyncio.gather(
