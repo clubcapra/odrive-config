@@ -33,6 +33,7 @@ class CanSimpleNode():
         self.trap_accel = 0.0
         self.trap_decel = 0.0
         self._setpoint = 0.0
+        self.endpointValues: Dict[ODriveEndpoints, Any] = dict()
         if self.node_id == 13:
             self.logger = Logger('node13', 'pos', 'sp', 'vel', 'state')
             
@@ -92,6 +93,9 @@ class CanSimpleNode():
         elif cmd_id == ODriveCommand.HEARTBEAT_CMD:
             errOrDisarmReason, self.state, procedureDone, trajDone = struct.unpack('<IBBBx', msg.data)
             self.log()
+        elif cmd_id == ODriveCommand.TX_SDO_CMD:
+            endpoint, value = struct.unpack('<xHxf', msg.data)
+            self.endpointValues[ODriveEndpoints(endpoint)] = value
 
     def clear_errors_msg(self, identify: bool = False) -> None:
         data = b'\x01' if identify else b'\x00'
@@ -154,6 +158,9 @@ class CanSimpleNode():
             data=payload,
             is_extended_id=False
         ))
+
+    def read_endpoint_msg(self, endpoint: ODriveEndpoints):
+        self._rxsdo(False, endpoint, '')
 
     def set_inertia(self, inertia: float):
         self._rxsdo(True, ODriveEndpoints.CONFIG_INERTIA, 'f', inertia)

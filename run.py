@@ -26,7 +26,7 @@ import prompt_toolkit.validation
 import prompt_toolkit.widgets
 
 from can_simple_utils import CanSimpleNode
-from odrive_types import ODriveAxisState, ODriveControlMode, ODriveInputMode
+from odrive_types import ODriveAxisState, ODriveControlMode, ODriveEndpoints, ODriveInputMode
 from xbox_controller import Axis, Button, ControllerBindings, XboxController
 
 import prompt_toolkit
@@ -383,11 +383,26 @@ async def logger_loop(all_nodes: List[CanSimpleNode]):
         'velocity',
         'motor_temp',
         'fet_temp',
+        'effective_current_lim'
     ]
     with MultiContext([Logger(f'node_{node.node_id}', *fields) for node in all_nodes]) as loggers:
+        i = 0
         while True:
             for node, logger in zip(all_nodes, loggers):
-                logger.entry(node.voltage, node.current, node.torque, node.velocity, node.motorTemperature, node.fetTemperature)
+                node.read_endpoint_msg(ODriveEndpoints.EFFECTIVE_CURRENT_LIM)
+                logger.entry(
+                    node.voltage, 
+                    node.current, 
+                    node.torque, 
+                    node.velocity, 
+                    node.motorTemperature, 
+                    node.fetTemperature, 
+                    node.endpointValues.get(ODriveEndpoints.EFFECTIVE_CURRENT_LIM, 0.0)
+                )
+                if i % 10 == 0:
+                    logger.writer.flush()
+                    i = 0
+                i += 1
             await asyncio.sleep(1.0)
 
 async def control(xbox: XboxController, mockFlippers: bool):
