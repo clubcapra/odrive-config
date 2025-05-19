@@ -3,6 +3,7 @@ import struct
 import threading
 import time
 from time import sleep
+from typing import List, Dict, Tuple, Literal
 
 from can_simple_utils import CanSimpleNode
 from xbox_controller import XboxController
@@ -18,16 +19,26 @@ MAIN_LOOP_INTERVAL = 0.1    # seconds
 WATCHDOG_INTERVAL = 1.0     # seconds
 TEMP_LOG_INTERVAL = 2.0     # seconds
 
+Side = Literal['left', 'right']
+
 # CAN node IDs
-TRACK_IDS = {
+TRACK_IDS: Dict[Side, List[int]] = {
     'left':  [21, 22],
     'right': [23, 24],
 }
-FLIPPER_IDS = [11,12,13,14]
+
+Pos = Literal['front_left', 'rear_left', 'front_right', 'rear_right']
+
+FLIPPER_IDS: Dict[Pos, int] = {
+    'front_left' : 11,
+    'rear_left' : 12,
+    'front_right' : 13,
+    'rear_right' : 14,
+}
 GET_TEMPERATURE_CMD = 0x15
 
 
-def init_can_bus(channel='can0', bitrate=500000):
+def init_can_bus(channel:str='can0', bitrate:int=500000) -> can.BusABC:
     print("Starting can bus")
     bus = can.interface.Bus(channel=channel, interface='socketcan', bitrate=bitrate)
     # flush pending frames
@@ -37,16 +48,17 @@ def init_can_bus(channel='can0', bitrate=500000):
     return bus
 
 
-def create_nodes(bus):
+def create_nodes(bus: can.BusABC) -> Tuple[Dict[Side, List[CanSimpleNode]], Dict[Pos, CanSimpleNode]]:
     print("Creating nodes")
-    tracks = {side: [CanSimpleNode(bus, nid) for nid in ids]
+    tracks: Dict[Side, List[CanSimpleNode]] = {side: [CanSimpleNode(bus, nid) for nid in ids]
               for side, ids in TRACK_IDS.items()}
-    flippers = [CanSimpleNode(bus, nid) for nid in FLIPPER_IDS]
+    flippers: Dict[Pos, CanSimpleNode] = {pos: CanSimpleNode(bus, nid)
+              for pos, nid in FLIPPER_IDS.items()}
     print("Done")
     return tracks, flippers
 
 
-def estop_monitor(nodes, bus, heartbeat):
+def estop_monitor(nodes: List[CanSimpleNode], bus: can.BusABC, heartbeat: threading.Event) -> None:
     """Shuts down motors if heartbeat is missed."""
     while True:
         heartbeat.clear()
@@ -56,7 +68,7 @@ def estop_monitor(nodes, bus, heartbeat):
                 node.call_estop()
 
 
-def error_monitor(nodes, bus):
+def error_monitor(nodes: List[CanSimpleNode], bus: can.BusABC) -> None:
     """Listens for node errors and triggers E-Stop if any occur."""
     while True:
         msg = bus.recv()
@@ -70,11 +82,11 @@ def error_monitor(nodes, bus):
                 break
 
 
-def clamp(val, lo=-1.0, hi=1.0):
+def clamp(val:float, lo:float=-1.0, hi:float=1.0) -> float:
     return max(min(val, hi), lo)
 
 
-def handle_tracks(controller, tracks, enabled):
+def handle_tracks(controller: XboxController, tracks: Dict[Side, List[CanSimpleNode]], enabled:bool) -> None:
     """
     Left stick X = throttle, Left stick Y = steering.
     """
@@ -95,8 +107,25 @@ def handle_tracks(controller, tracks, enabled):
         node.set_velocity(right_speed)
 
 
-def handle_flippers(controller, flippers):
+def handle_flippers(controller: XboxController, flippers: Dict[Pos, CanSimpleNode]) -> None:
     """Sets flipper velocities based on D-pad Up/Down."""
+    positions: List[Pos] = []
+    if controller.LeftBumper:
+        positions.append('front_left')
+    if controller.LeftTrigger:
+        positions.append('rear_left')
+    if controller.RightBumper:
+        positions.append('front_right')
+    if controller.RightTrigger:
+        positions.append('rear_right')
+
+    if len(positions) == 0:
+        positions = [
+            'front_left',
+            'rear_left',
+            'front_right',
+            'rear_right',
+        ]
     if controller.UpDPad:
         vel = FLIPPER_SPEED
     elif controller.DownDPad:
@@ -104,14 +133,14 @@ def handle_flippers(controller, flippers):
     else:
         vel = 0.0
 
-    for node in flippers:
-        node.set_velocity(vel)
+    for p in positions:
+        flippers[p].set_velocity(vel)
 
 
 def main():
     bus = init_can_bus()
     tracks, flippers = create_nodes(bus)
-    all_nodes = tracks['left'] + tracks['right'] + flippers
+    all_nodes = tracks['left'] + tracks['right'] + list(flippers.values())
 
     heartbeat = threading.Event()
 
