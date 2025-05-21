@@ -42,7 +42,7 @@ class XboxController(object):
         devices = [evdev.InputDevice(path) for path in evdev.list_devices()]
         self.device_path = ""
         for device in devices:
-            if device.name == "Xbox Wireless Controller":
+            if device.name in ["Xbox Wireless Controller", "Microsoft Xbox Series S|X Controller"]:
                 self.device_path = device.path
                 break
 
@@ -92,14 +92,14 @@ class XboxController(object):
                         self.LeftJoystickY = self._apply_deadzone((-event.value + XboxController.MAX_JOY_VAL) / XboxController.MAX_JOY_VAL)
                     elif event.code == evdev.ecodes.ABS_X:
                         self.LeftJoystickX = self._apply_deadzone((event.value - XboxController.MAX_JOY_VAL) / XboxController.MAX_JOY_VAL)
-                    elif event.code == evdev.ecodes.ABS_RZ:
+                    elif event.code == evdev.ecodes.ABS_RY:
                         self.RightJoystickY = self._apply_deadzone((-event.value + XboxController.MAX_JOY_VAL) / XboxController.MAX_JOY_VAL)
-                    elif event.code == evdev.ecodes.ABS_Z:
+                    elif event.code == evdev.ecodes.ABS_RX:
                         self.RightJoystickX = self._apply_deadzone((event.value - XboxController.MAX_JOY_VAL) / XboxController.MAX_JOY_VAL)
-                    elif event.code == evdev.ecodes.ABS_BRAKE:
-                        self.LeftTrigger = event.value / XboxController.MAX_TRIG_VAL
-                    elif event.code == evdev.ecodes.ABS_GAS:
+                    elif event.code == evdev.ecodes.ABS_RZ:
                         self.RightTrigger = event.value / XboxController.MAX_TRIG_VAL
+                    elif event.code == evdev.ecodes.ABS_Z:
+                        self.LeftTrigger = event.value / XboxController.MAX_TRIG_VAL
                     elif event.code == evdev.ecodes.ABS_HAT0X:
                         if event.value == 1:
                             self.RightDPad = 1
