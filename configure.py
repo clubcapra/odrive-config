@@ -114,7 +114,7 @@ async def restore_config(odrv: EndpointAccess, config: dict):
         print(f"  {k} = {v}")
         await odrv.write_and_verify(k, v)
 
-async def configure(node_id, bus, config, save_config, calibrate):
+async def configure(node_id:int, bus:can.BusABC, config:dict, save_config:bool, calibrate:bool):
     with CanSimpleNode(bus=bus, node_id=node_id) as node:
         odrv = EndpointAccess(node=node, endpoint_data={})
         print("Node id:", node_id)

@@ -1,8 +1,10 @@
+from __future__ import annotations
 # 100% from https://github.com/odriverobotics/ODriveResources/blob/master/examples/can_simple_utils.py
 import asyncio
 import can
 import struct
 
+from typing import Tuple
 from odrive_error_codes import get_error_description
 
 ADDRESS_CMD = 0x06
@@ -23,13 +25,13 @@ REBOOT_ACTION_SAVE = 1
 REBOOT_ACTION_ERASE = 2
 
 class CanSimpleNode():
-    def __init__(self, bus: can.Bus, node_id: int):
-        self.bus = bus
-        self.node_id = node_id
-        self.reader = can.AsyncBufferedReader()
-        self.connected = False
+    def __init__(self, bus: can.BusABC, node_id: int):
+        self.bus: can.BusABC = bus
+        self.node_id: int = node_id
+        self.reader: can.AsyncBufferedReader = can.AsyncBufferedReader()
+        self.connected: bool = False
 
-    def __enter__(self):
+    def __enter__(self) -> CanSimpleNode:
         self.notifier = can.Notifier(
             self.bus, [self.reader], loop=asyncio.get_running_loop()
         )
@@ -38,7 +40,7 @@ class CanSimpleNode():
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.notifier.stop()
 
-    def flush_rx(self):
+    def flush_rx(self) -> None:
         while not self.reader.buffer.empty():
             self.reader.buffer.get_nowait()
 
@@ -49,7 +51,7 @@ class CanSimpleNode():
                     return msg
         return asyncio.wait_for(_impl(), timeout)
 
-    def clear_errors_msg(self, identify: bool = False):
+    def clear_errors_msg(self, identify: bool = False) -> None:
         data = b'\x01' if identify else b'\x00'
         self.bus.send(can.Message(
             arbitration_id=(self.node_id << 5) | CLEAR_ERRORS_CMD,
@@ -64,7 +66,7 @@ class CanSimpleNode():
             is_extended_id=False
         ))
 
-    def getErrorDescription(self, error_code):
+    def getErrorDescription(self, error_code: int):
         desc = get_error_description(error_code)
         print(f"CAN {self.node_id} Error Code: {error_code} - {desc}")
         self.clear_errors_msg()
@@ -78,7 +80,7 @@ class CanSimpleNode():
         ))
         self.connected = False
 
-    def wait_state(self, stateWaited: int, msg):
+    def wait_state(self, stateWaited: int, msg: can.Message) -> bool:
         if self.connected:
             return True
         expected_id = (self.node_id << 5) | 0x01  # Heartbeat cmd_id=1
@@ -91,7 +93,7 @@ class CanSimpleNode():
                 return True
         return False
 
-    def set_velocity(self, vel: float):
+    def set_velocity(self, vel: float) -> None:
         payload = struct.pack('<ff', vel, 0.0)
         self.bus.send(can.Message(
             arbitration_id=(self.node_id << 5) | 0x0D,  # Set_Input_Vel
@@ -99,7 +101,7 @@ class CanSimpleNode():
             is_extended_id=False
         ))
 
-    def set_position(self, pos: float, vel_feedforward: float = 0.0, torque_feedforward: float = 0.0):
+    def set_position(self, pos: float, vel_feedforward: float = 0.0, torque_feedforward: float = 0.0) -> None:
         """
         Set target position (revolutions) with optional velocity and torque feed-forward.
 
@@ -117,7 +119,7 @@ class CanSimpleNode():
             is_extended_id=False
         ))
 
-    def call_estop(self):
+    def call_estop(self) -> None:
         self.bus.send(can.Message(
             arbitration_id=(self.node_id << 5) | 0x02,  # Estop cmd_id=2
             data=b'',
@@ -126,7 +128,7 @@ class CanSimpleNode():
 
     # ----- Newly added getters for feedback -----
 
-    def get_encoder_estimates_msg(self):
+    def get_encoder_estimates_msg(self) -> None:
         """Request encoder position and velocity."""
         self.bus.send(can.Message(
             arbitration_id=(self.node_id << 5) | GET_ENCODER_ESTIMATES_CMD,
@@ -134,12 +136,12 @@ class CanSimpleNode():
             is_remote_frame=True
         ))
 
-    async def get_encoder_estimates(self, timeout=1.0):
+    async def get_encoder_estimates(self, timeout: float=1.0) -> Tuple[float, float]:
         self.get_encoder_estimates_msg()
         msg = await self.await_msg(GET_ENCODER_ESTIMATES_CMD, timeout)
         return struct.unpack('<ff', msg.data)
 
-    def get_temperature_msg(self):
+    def get_temperature_msg(self) -> None:
         """Request FET and motor temperatures."""
         self.bus.send(can.Message(
             arbitration_id=(self.node_id << 5) | GET_TEMPERATURE_CMD,
@@ -147,7 +149,7 @@ class CanSimpleNode():
             is_remote_frame=True
         ))
 
-    async def get_temperature(self, timeout=1.0):
+    async def get_temperature(self, timeout: float=1.0):
         self.get_temperature_msg()
         msg = await self.await_msg(GET_TEMPERATURE_CMD, timeout)
         return struct.unpack('<ff', msg.data)

@@ -33,7 +33,7 @@ REBOOT_ACTION_ERASE = 2
 def sn_str(sn):
     return f"{sn:012X}"
 
-def get_address_msg(bus: can.Bus):
+def get_address_msg(bus: can.BusABC):
     msg = can.Message(
         arbitration_id=(BROADCAST_NODE_ID << 5) | ADDRESS_CMD,
         is_extended_id=False,
@@ -41,7 +41,7 @@ def get_address_msg(bus: can.Bus):
     )
     bus.send(msg)
 
-def set_address_msg(bus, sn, node_id):
+def set_address_msg(bus, sn, node_id: int):
     msg = can.Message(
         arbitration_id=(BROADCAST_NODE_ID << 5) | ADDRESS_CMD,
         # Connection_ID for firmware >=0.6.11 omitted (connectionless)
@@ -50,7 +50,7 @@ def set_address_msg(bus, sn, node_id):
     )
     bus.send(msg)
 
-def identify_msg(bus: can.Bus, node_id: int, enable: bool):
+def identify_msg(bus: can.BusABC, node_id: int, enable: bool):
     msg = can.Message(
         arbitration_id=(node_id << 5) | CLEAR_ERRORS_CMD,
         data=b'\x01' if enable else b'\x00',
@@ -58,7 +58,7 @@ def identify_msg(bus: can.Bus, node_id: int, enable: bool):
     )
     bus.send(msg)
 
-def reboot_msg(bus: can.Bus, node_id: int, action: int):
+def reboot_msg(bus: can.BusABC, node_id: int, action: int):
     msg = can.Message(
         arbitration_id=(node_id << 5) | REBOOT_CMD,
         data=[action],
@@ -113,7 +113,7 @@ class Discoverer():
                 if self.auto_assign:
                     self.assign_free_node_id(serial_number)
 
-async def scan_for_devices(bus):
+async def scan_for_devices(bus: can.BusABC):
     """
     Scans for ODrives on the bus and assigns addresses for all ODrives that are
     not addressed yet. This should discover all ODrives, regardless of their
@@ -145,7 +145,7 @@ async def scan_for_devices(bus):
     print(f"Scan complete. Discovered {len(discoverer.discovered_devices)} ODrives.\n")
     return discoverer.discovered_devices
 
-def identify_ui(bus: can.Bus, node_ids: List[int], user_labels: List[str]) -> Dict[str, int]:
+def identify_ui(bus: can.BusABC, node_ids: List[int], user_labels: List[str]):
     """
     Blinks the LEDs of the specified ODrives one by one and shows interactive
     user prompts to determine which node_id belongs to which user label.
@@ -184,18 +184,17 @@ def identify_ui(bus: can.Bus, node_ids: List[int], user_labels: List[str]) -> Di
             print("  n: none/other/multiple")
 
             while True:    
+                num = None
                 user_response = input("Enter a number from the list above: ")
-
                 if user_response.lower() in ['n', 'none']:
-                    num = None
                     break
                 else:
                     try:
                         num = int(user_response)
+                        if num >= 0 and num < len(user_labels):
+                            break
                     except ValueError:
                         pass # not a number
-                    if num >= 0 and num < len(user_labels):
-                        break
 
                 print("Invalid input")
 
@@ -220,7 +219,7 @@ def identify_ui(bus: can.Bus, node_ids: List[int], user_labels: List[str]) -> Di
     return found_all, node_to_label
 
 
-async def set_addresses(bus: can.Bus, sn_to_node_id: Dict[int, int]):
+async def set_addresses(bus: can.BusABC, sn_to_node_id: Dict[int, int]):
     """
     Assigns the specified node IDs to the specified ODrives identified by serial
     number. This works regardless of the previous node ID of the corresponding
@@ -232,7 +231,7 @@ async def set_addresses(bus: can.Bus, sn_to_node_id: Dict[int, int]):
     ----------
     sn_to_node_id: dict of the form {serial_number: node_id}
     """
-    for sn, node_id in sn_to_node_id:
+    for sn, node_id in sn_to_node_id.items():
         set_address_msg(bus, sn, node_id)
 
 
