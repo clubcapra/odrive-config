@@ -1,17 +1,29 @@
 import asyncio
+from dataclasses import dataclass
+import itertools
+import json
+from pathlib import Path
 import sys
 import can
 import struct
 import threading
 import time
 from time import sleep
-from typing import List, Dict, Tuple, Literal, Union
+from typing import List, Dict, Sequence, Tuple, Literal, Union
 from asyncio import gather
 
-from can_simple_utils import CanSimpleNode
-from xbox_controller import XboxController
+import prompt_toolkit.completion
+import prompt_toolkit.contrib
+import prompt_toolkit.contrib.completers
+import prompt_toolkit.contrib.regular_languages
+import prompt_toolkit.validation
 
-from control import Device, Flipper, MockFlipper, Pair, load_flippers, save_flippers
+from can_simple_utils import CanSimpleNode
+from xbox_controller import ControllerBindings, XboxController
+
+import prompt_toolkit
+
+from control import Device, Flipper, MockFlipper, converge_group, load_flippers, move_group, move_single, save_flippers
 
 # Control modes
 CLOSED_LOOP_CONTROL = 8
@@ -24,6 +36,8 @@ FLIPPER_MOVE_OFFSET = 50         # revs
 MAIN_LOOP_INTERVAL = 0.1    # seconds
 WATCHDOG_INTERVAL = 1.0     # seconds
 TEMP_LOG_INTERVAL = 2.0     # seconds
+
+XBOX_CONFIG_PATH = Path('bindings')
 
 Side = Union[str, Literal['left', 'right']]
 
@@ -99,8 +113,8 @@ def handle_tracks(controller: XboxController, tracks: Dict[Side, List[CanSimpleN
     Left stick X = throttle, Left stick Y = steering.
     """
     if enabled:
-        throttle = -clamp(controller.LeftJoystickX)
-        steering = clamp(controller.LeftJoystickY)
+        throttle = -clamp(controller.LeftJoystickX.value)
+        steering = clamp(controller.LeftJoystickY.value)
         left_cmd  = throttle + steering
         right_cmd = throttle - steering
     else:
@@ -114,23 +128,18 @@ def handle_tracks(controller: XboxController, tracks: Dict[Side, List[CanSimpleN
     for node in tracks['right']:
         node.set_velocity(right_speed)
 
-
-def handle_flippers(controller: XboxController, flippers: Dict[Pos, Flipper], front_pair: Pair, rear_pair: Pair, all_pair: Pair, enabled:bool) -> None:
+def handle_flippers(controller: XboxController, flippers: Dict[Pos, Flipper], enabled:bool) -> None:
     """Sets flipper velocities based on D-pad Up/Down."""
     positions: List[Pos] = []
-    if controller.LeftBumper:
+    if controller.LeftBumper.state:
         positions.append('front_left')
-    if controller.LeftTrigger:
+    if controller.LeftTriggerBtn.state:
         positions.append('rear_left')
-    if controller.RightBumper:
+    if controller.RightBumper.state:
         positions.append('front_right')
-    if controller.RightTrigger:
+    if controller.RightTriggerBtn.state:
         positions.append('rear_right')
 
-    is_all = len(positions) == 4
-    is_front = len(positions) == 2 and all(['front' in pos for pos in positions])
-    is_rear = len(positions) == 2 and all(['front' in pos for pos in positions])
-    
     if len(positions) == 0:
         positions = [
             'front_left',
@@ -140,90 +149,89 @@ def handle_flippers(controller: XboxController, flippers: Dict[Pos, Flipper], fr
         ]
     
     def _move(pos: float):
-        if enabled:
-            if is_all:
-                # Control each individually (RB, RT, LB, LT all being held)
-                for flipper in flippers.values():
-                    flipper.move(pos)
-            elif len(positions) == 4:
-                # Control all together 
-                all_pair.move(pos)
-            elif is_front:
-                # Control front together
-                front_pair.move(pos)
-                rear_pair.move(0) # Stop rear
-            elif is_rear:
-                # Control rear together
-                rear_pair.move(pos)
-                front_pair.move(0) # Stop front
-            elif len(positions) == 1:
-                # Control a single flipper
-                for name, flipper in flippers.items():
-                    if name in positions:
-                        flipper.move(pos)
-                    else:
-                        flipper.move(0) # Stop others
+        if len(positions) != 1:
+            # Control all together 
+            if enabled:
+                move_group([flippers[p] for p in positions], pos)
+            else:
+                move_group([flippers[p] for p in positions], 0)
         else:
-            all_pair.move(0) # Stop all
+            move_single(flippers[positions[0]], pos)
+
+        for p in filter(lambda p: p not in positions, flippers.keys()):
+            flippers[p].setPosition = flippers[p].position
+            
     
-    if controller.UpDPad:
+    if wasMoving and not (controller.UpDPad.state or controller.DownDPad.state):
+        move_group([flippers[p] for p in positions], 0)
+        for p in filter(lambda p: p not in positions, flippers.keys()):
+            flippers[p].setPosition = flippers[p].position
+    if controller.UpDPad.state:
         _move(FLIPPER_MOVE_OFFSET)
-    elif controller.DownDPad:
+    elif controller.DownDPad.state:
         _move(-FLIPPER_MOVE_OFFSET)
-    elif controller.LeftDPad and controller.Y and not enabled:
-        if is_all:
-            # Set main pair zero (RB, RT, LB, LT all being held)
-            all_pair.zero()
-        elif len(positions) == 4:
-            # Set all individual zeros
-            for flipper in flippers.values():
-                flipper.zero()
-        elif is_front:
-            # Set front offset
-            front_pair.zero()
-        elif is_rear:
-            # Set rear offset
-            rear_pair.zero()
-        elif len(positions) == 1:
-            # Set specific flipper offset
-            for name, flipper in flippers.items():
-                if name in positions:
-                    flipper.zero()
-    elif controller.RightDPad:
-        if enabled:
-            if is_all:
-                # Return all to individual zero (RB, RT, LB, LT all being held)
-                for flipper in flippers.values():
-                    flipper.go_home()
-            elif len(positions) == 4:
-                # Return front and rear to offset
-                all_pair.go_home()
-            elif is_front:
-                # Return front to offset
-                front_pair.go_home()
-                rear_pair.move(0) # Stop rear
-            elif is_rear:
-                # Return rear to offset
-                rear_pair.go_home()
-                front_pair.move(0) # Stop front
-            elif len(positions) == 1:
-                # Set specific flipper offset
-                for name, flipper in flippers.items():
-                    if name in positions:
-                        flipper.go_home()
-        else:
-            all_pair.move(0) # Stop all
+    elif controller.LeftDPad.state and controller.Y.state and not enabled:
+        for p in positions:
+            flippers[p].zero()
+    elif controller.RightDPad.state:
+        # Converge
+        converge_group([flippers[p] for p in positions])
+
+def xbox_binding_completer() -> Sequence[str]:
+    return [f.stem for f in XBOX_CONFIG_PATH.iterdir()]
+
+def save_bindings(controller: XboxController):
+    while True:
+        completer = prompt_toolkit.completion.FuzzyWordCompleter(xbox_binding_completer)
+        name = prompt_toolkit.shortcuts.input_dialog("Save bindings", "bindings file name", 
+                                                completer=completer).run()
+        if not name.endswith('.json'):
+            name += '.json'
+            
+        path = XBOX_CONFIG_PATH.with_name(name)
+        if path.exists():
+            if not prompt_toolkit.shortcuts.yes_no_dialog("Overwrite?", "File already exists, do you want to overwrite?"):
+                continue
+        
+        with path.open('+w') as wr:
+            json.dump(controller.bindings.dump(), wr)
+            prompt_toolkit.print_formatted_text(f"Saved to {str(path)}")
+            return
+
+def learn_new(controller: XboxController):
+    controller.learn()
+    save_bindings(controller)
+
+def select_bindings(controller: XboxController):
+    if not XBOX_CONFIG_PATH.exists():
+        XBOX_CONFIG_PATH.mkdir()
+    if len(list(XBOX_CONFIG_PATH.iterdir())) == 0:
+        learn_new(controller)
+        return
+    
+    res = prompt_toolkit.shortcuts.button_dialog("Bindings selection",
+                                           [
+                                               ('Create new', '*new'),
+                                               *[(n, n) for n in xbox_binding_completer()]
+                                           ])
+    if res == '*new':
+        learn_new(controller)
     else:
-        all_pair.move(0)
+        path = XBOX_CONFIG_PATH.with_name(f'{res}.json')
+        with path.open('r') as rd:
+            data = json.load(rd)
+            controller.load_bindings(ControllerBindings.load(data))
 
 def main():
     mockFlippers = False
+    xbox = XboxController()
     if len(sys.argv) >= 2:
-        if sys.argv[1] == 'mock':
+        if 'mock' in sys.argv:
             mockFlippers = True
-        else:
-            print("Usage: run.py [mock]")
-            return
+        if 'config' in sys.argv:
+            select_bindings(xbox)
+            
+        print("Usage: run.py [mock]")
         
     if not mockFlippers:
         bus = init_can_bus()
@@ -238,9 +246,6 @@ def main():
             'front_right' : MockFlipper(55, 10),
             'rear_right' : MockFlipper(55, 9),
         }
-    front_pair: Pair = Pair(flipper_devs['front_left'], flipper_devs['front_right'])
-    rear_pair: Pair = Pair(flipper_devs['rear_left'], flipper_devs['rear_right'])
-    all_pair: Pair = Pair(front_pair, rear_pair)
 
     if not mockFlippers:
         heartbeat = threading.Event()
@@ -252,59 +257,68 @@ def main():
             node.clear_errors_msg()
             node.set_state_msg(IDLE)
 
-    xbox = XboxController()
     drive_enabled = False
     error_cleared = False
 
     try:
         while True:
-            if not MockFlipper:
+            if not mockFlippers:
                 heartbeat.set()
 
             # E-Stop: bumpers
-            if xbox.LeftBumper or xbox.RightBumper:
-                if not MockFlipper:
+            if xbox.LeftBumper.state or xbox.RightBumper.state:
+                if not mockFlippers:
                     for node in all_nodes:
                         node.call_estop()
+                else:
+                    for d in flipper_devs.values():
+                        d.enable = False # type: ignore
                 drive_enabled = False
 
             # Toggle drive enable: A button
-            if xbox.A and not drive_enabled:
-                if not MockFlipper:
+            if xbox.A.state and not drive_enabled:
+                if not mockFlippers:
                     for node in all_nodes:
                         node.set_state_msg(CLOSED_LOOP_CONTROL)
+                else:
+                    for d in flipper_devs.values():
+                        d.enable = True # type: ignore
                 drive_enabled = True
-            elif (not xbox.A or not xbox.Connected) and drive_enabled:
-                if not MockFlipper:
+            elif (not xbox.A.state or not xbox.Connected) and drive_enabled:
+                if not mockFlippers:
                     for node in all_nodes:
                         node.set_state_msg(IDLE)
+                else:
+                    for d in flipper_devs.values():
+                        d.enable = False # type: ignore
                 drive_enabled = False
 
             # Clear errors: B button
-            if xbox.B and not error_cleared:
-                if not MockFlipper:
+            if xbox.B.state and not error_cleared:
+                if not mockFlippers:
                     for node in all_nodes:
                         node.clear_errors_msg()
                 error_cleared = True
-            elif not xbox.B:
+            elif not xbox.B.state:
                 error_cleared = False
 
             pos_monitor(flipper_devs)
-            handle_flippers(xbox, flipper_devs, front_pair, rear_pair, all_pair, drive_enabled)
-            if not MockFlipper:
+            handle_flippers(xbox, flipper_devs, drive_enabled)
+            if not mockFlippers:
                 handle_tracks(xbox, tracks, drive_enabled)
             else:
+                print()
                 for name, flipper in flipper_devs.items():
                     shortName = ''.join([n[0] for n in name.split('_')]).upper()
                     values: Dict[str, float] = {
                         '_p': flipper._position,
-                        '_s': flipper._setposition,
+                        '_s': flipper._setPosition,
                         'P': flipper.position,
-                        'S': flipper.setposition,
+                        'S': flipper.setPosition,
                         '_o': flipper._offset,
+                        '_t': flipper._targetOffset,
                         '_v': flipper._velocity,
                     }
-                    print()
                     fields = [f'{n}:{str(round(v, 3)).ljust(7)}' for n, v in values.items()]
                     print(f'{shortName}: {"|".join(fields)}')
 
@@ -313,7 +327,7 @@ def main():
     except KeyboardInterrupt:
         print("[INFO] KeyboardInterrupt: E-Stopping all nodes.")
         print("[WARNING] DO NOT FORCE KILL!!! SAVING FLIPPER POSITIONS IN 3 SECONDS!")
-        if not MockFlipper:
+        if not mockFlippers:
             for node in all_nodes:
                 node.call_estop()
             sleep(3)
@@ -321,7 +335,7 @@ def main():
             save_flippers(flipper_devs)
 
     finally:
-        if not MockFlipper:
+        if not mockFlippers:
             print("[WARNING] DO NOT FORCE KILL!!! SAVING FLIPPER POSITIONS IN 3 SECONDS!")
             for node in all_nodes:
                 node.set_state_msg(IDLE)

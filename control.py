@@ -2,13 +2,24 @@ from asyncio import wait
 from datetime import datetime
 from pathlib import Path
 from statistics import mean
-from typing import Dict, Optional
+from typing import Dict, Iterable, Optional
 from typing_extensions import override
 from can_simple_utils import CanSimpleNode
 from abc import abstractmethod, ABC
 from json import dump, load
 
 FLIPPER_OFFSETS_PATH = Path("flipper_pos.json")
+
+"""Device:
+Data:
+position: Actual position
+setpoint: Actual current setpoint
+enable: Activate the movement
+
+Actions:
+
+
+"""
 
 class Device(ABC):
     @property
@@ -17,107 +28,135 @@ class Device(ABC):
     
     @property
     @abstractmethod
-    def setposition(self) -> float: ...
+    def setPosition(self) -> float: ...
     
-    @setposition.setter
+    @setPosition.setter
     @abstractmethod
-    def setposition(self, value: float): ...
+    def setPosition(self, value: float): ...
+    
+    @property
+    @abstractmethod
+    def offset(self) -> float: ...
+    
+    @offset.setter
+    @abstractmethod
+    def offset(self, value: float): ...
+    
+    @property
+    @abstractmethod
+    def targetOffset(self) -> float: ...
+    
+    @targetOffset.setter
+    @abstractmethod
+    def targetOffset(self, value: float): ...
     
     @abstractmethod
     async def update(self): ...
     
-    
-    def move(self, positionDelta: float):
-        """Moves the setposition to 'self.position + positionDelta'
-
-        Args:
-            positionDelta (float): Revs to move relative to current position
-        """
-        
     @abstractmethod
     def zero(self):
         """Sets offset to current position
         """
         ...
     
-    @abstractmethod
-    def go_home(self):
-        """Go to offset
-        """
-        ...
-        
 class Flipper(Device):
     def __init__(self, node: CanSimpleNode):
         self.node = node
+        self._zero: float = 0.0
         self._offset: float = 0.0
         self._position: float = 0.0
         self._velocity: float = 0.0
-        self._setposition: float = 0.0
+        self._setPosition: float = 0.0
+        self._targetOffset: float = 0.0
+        self._offsetting: bool = False
     
     @property
     @override
     def position(self) -> float:
-        return self._position - self._offset
+        return self._position - self._zero
+
+    def _sendPosition(self):
+        self.node.set_position(self._setPosition)
 
     @property
     @override
-    def setposition(self) -> float:
-        return self._setposition - self._offset
+    def setPosition(self) -> float:
+        return self._setPosition - self._zero - self._offset
     
-    @setposition.setter
+    @setPosition.setter
     @override
-    def setposition(self, value: float):
-        self._setposition = value + self._offset
-        self.node.set_position(self._setposition)
+    def setPosition(self, value: float):
+        self._offsetting = False
+        self._setPosition = value + self._zero + self._offset
+        self._sendPosition()
         
     @property
+    @override
     def offset(self) -> float:
         return self._offset
     
     @offset.setter
+    @override
     def offset(self, value: float):
         self._offset = value
+        self._sendPosition()
+        
+    @property
+    @override
+    def targetOffset(self) -> float:
+        return self._targetOffset
+    
+    @targetOffset.setter
+    @override
+    def targetOffset(self, value: float):
+        self._offsetting = True
+        
+        self._targetOffset = value
+        self._sendPosition()
         
     @override
     async def update(self):
+        prev = self._position
         self._position, self._velocity = await self.node.get_encoder_estimates()
+        if self._offsetting:
+            self._offset += self._position - prev
+        if abs(self._targetOffset - self._offset) < 0.5:
+            self._offsetting = False
         
     @override
     def zero(self):
-        self._offset = self._position
-        
-    @override
-    def move(self, positionDelta: float):
-        self.setposition = self.position + positionDelta
-        
-    @override
-    def go_home(self):
-        self.setposition = self.offset
+        self._zero = self._position
         
 class MockFlipper(Flipper):
     def __init__(self, maxVelocity: float, maxAcceleration: float):
         self._maxVelocity = maxVelocity
         self._maxAcceleration = maxAcceleration
+        self._zero: float = 0.0
         self._offset: float = 0.0
+        self._targetOffset: float = 0.0
+        self._offsetting = False
         self._position: float = 0.0
         self._velocity: float = 0.0
-        self._setposition: float = 0.0
+        self._setPosition: float = 0.0
         self._lastUpdate: Optional[datetime] = None
+        self.enable = False
         
     @property
     @override
     def position(self) -> float:
-        return self._position - self._offset
+        return self._position - self._zero
 
     @property
     @override
-    def setposition(self) -> float:
-        return self._setposition - self._offset
+    def setPosition(self) -> float:
+        return self._setPosition - self._zero
     
-    @setposition.setter
+    @setPosition.setter
     @override
-    def setposition(self, value: float):
-        self._setposition = value + self._offset
+    def setPosition(self, value: float):
+        self._targetOffset = self._offset
+        self._offsetting = False
+        self._setPosition = value + self._zero
         
     @property
     def offset(self) -> float:
@@ -127,83 +166,60 @@ class MockFlipper(Flipper):
     def offset(self, value: float):
         self._offset = value
         
+    @property
+    @override
+    def targetOffset(self) -> float:
+        return self._targetOffset
+    
+    @targetOffset.setter
+    @override
+    def targetOffset(self, value: float):
+        self._offsetting = abs(self._targetOffset - self._offset) >= 0.5
+        self._targetOffset = value
+        
     @override
     async def update(self):
-        if self._lastUpdate is None:
+        if self._lastUpdate is None or not self.enable:
             self._lastUpdate = datetime.now()
             return
         now = datetime.now()
         deltaTime = now - self._lastUpdate
         self._lastUpdate = now
         
-        if self._position < self._setposition:
-            self._position = min(self._setposition, self._position + self._maxVelocity * deltaTime.total_seconds())
-        elif self._position > self._setposition:
-            self._position = max(self._setposition, self._position - self._maxVelocity * deltaTime.total_seconds())
+        prev = self._position
+        target = self._setPosition + self._zero + self._targetOffset
+        
+        if self._position < target:
+            self._position = min(target, self._position + self._maxVelocity * deltaTime.total_seconds())
+        elif self._position > target:
+            self._position = max(target, self._position - self._maxVelocity * deltaTime.total_seconds())
+            
+        if self._offsetting:
+            self._offset += self._position - prev
+        if abs(self._targetOffset - self._offset) < 0.5:
+            self._offsetting = False
+            self._targetOffset = self._offset
+            
     @override
     def zero(self):
-        self._offset = self._position
-        
-    @override
-    def move(self, positionDelta: float):
-        self.setposition = self.position + positionDelta
-        
-    @override
-    def go_home(self):
-        self.setposition = self.offset
-        
-class Pair(Device):
-    def __init__(self, dev1: Device, dev2: Device):
-        self.dev1 = dev1
-        self.dev2 = dev2
-        self._diff: float = 0.0
-        self._offset: float = 0.0
-        self._isMoving = False
-        self._isHoming = False
+        old = self._zero
+        self._zero = self._position
+        self._offset = old - self._zero
 
-    @property
-    @override
-    def position(self) -> float:
-        return mean([self.dev1.position, self.dev2.position]) - self._offset
+def move_single(device: Device, relativePosition: float):
+    device.targetOffset = device.offset + relativePosition
+    
+def converge_group(group: Iterable[Device]):
+    for d in group:
+        d.targetOffset = 0.0
 
-    @property
-    @override
-    def setposition(self) -> float:
-        return mean([self.dev1.setposition, self.dev2.setposition]) - self._offset
+def move_group(group: Iterable[Device], relativePosition: float):
+    target = mean([d.position for d in group]) + relativePosition
     
-    @setposition.setter
-    @override
-    def setposition(self, value: float):
-        self.dev1.setposition = value + self._offset + self._diff
-        self.dev2.setposition = value + self._offset - self._diff
-        
-    @override
-    async def update(self):
-        await wait([self.dev1.update(), self.dev2.update()])
-        
-    @override
-    def zero(self):
-        self._offset = self.position
-        
-    @override
-    def move(self, positionDelta: float):
-        if positionDelta == 0:
-            self._isMoving = False
-            self.dev1.move(0)
-            self.dev2.move(0)
-            return
-        elif not self._isMoving:
-            self._isMoving = True
-            self._diff = self.dev1.position - self.position
-        self.dev1.setposition = self.position + self._diff + positionDelta
-        self.dev2.setposition = self.position - self._diff + positionDelta
-        
-    @override
-    def go_home(self):
-        self._diff = 0
-        self.setposition = 0
-        self._isMoving = False
+    for d in group:
+        d.setPosition = target
     
+
 def ensure_flipper_config() -> bool:
     if FLIPPER_OFFSETS_PATH.exists():
         return True
