@@ -50,8 +50,10 @@ class ControllerBindings:
     LeftJoystickX: Binding = Binding(evdev.ecodes.EV_ABS, evdev.ecodes.ABS_X, -MAX_JOY_VAL, MAX_JOY_VAL, True)
     RightJoystickY: Binding = Binding(evdev.ecodes.EV_ABS, evdev.ecodes.ABS_RY, MAX_JOY_VAL, -MAX_JOY_VAL, True)
     RightJoystickX: Binding = Binding(evdev.ecodes.EV_ABS, evdev.ecodes.ABS_RX, -MAX_JOY_VAL, MAX_JOY_VAL, True)
-    LeftTrigger: Binding = Binding(evdev.ecodes.EV_ABS, evdev.ecodes.ABS_RZ, 0, MAX_TRIG_VAL)
-    RightTrigger: Binding = Binding(evdev.ecodes.EV_ABS, evdev.ecodes.ABS_Z, 0, MAX_TRIG_VAL)
+    # LeftTrigger: Binding = Binding(evdev.ecodes.EV_ABS, evdev.ecodes.ABS_RZ, 0, MAX_TRIG_VAL)
+    # RightTrigger: Binding = Binding(evdev.ecodes.EV_ABS, evdev.ecodes.ABS_Z, 0, MAX_TRIG_VAL)
+    LeftTrigger: Binding = Binding(evdev.ecodes.EV_ABS, evdev.ecodes.ABS_BRAKE, 0, MAX_TRIG_VAL)
+    RightTrigger: Binding = Binding(evdev.ecodes.EV_ABS, evdev.ecodes.ABS_GAS, 0, MAX_TRIG_VAL)
     DPadY: Binding = Binding(evdev.ecodes.EV_ABS, evdev.ecodes.ABS_HAT0X, 1, -1)
     DPadX: Binding = Binding(evdev.ecodes.EV_ABS, evdev.ecodes.ABS_HAT0Y, -1, 1)
     LeftBumper: Binding = Binding(evdev.ecodes.EV_KEY, evdev.ecodes.BTN_TL)
@@ -86,11 +88,11 @@ class Button:
         
     @property
     def state(self) -> bool:
-        return mapValue(self.binding.minValue, self.binding.maxValue, 0, 1, self.raw) > (self.binding.minValue + self.binding.maxValue) / 2
+        return mapValue(self.binding.minValue, self.binding.maxValue, 0, 1, self.raw) > 0.5
     
     @property
     def lastState(self) -> bool:
-        return mapValue(self.binding.minValue, self.binding.maxValue, 0, 1, self._lastRaw) > (self.binding.minValue + self.binding.maxValue) / 2
+        return mapValue(self.binding.minValue, self.binding.maxValue, 0, 1, self._lastRaw) > 0.5
     
     @property
     def pressed(self) -> bool:
