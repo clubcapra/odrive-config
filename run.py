@@ -18,12 +18,12 @@ import prompt_toolkit.contrib.completers
 import prompt_toolkit.contrib.regular_languages
 import prompt_toolkit.validation
 
-from can_simple_utils import CanSimpleNode
+from can_simple_utils import GET_ENCODER_ESTIMATES_CMD, CanSimpleNode
 from xbox_controller import ControllerBindings, XboxController
 
 import prompt_toolkit
 
-from control import AllInstruction, FakeFlipper, Flipper, PairInstruction, SingleInstruction, load_flippers, save_flippers
+from control import AllInstruction, FakeFlipper, Flipper, OnExit, PairInstruction, SingleInstruction, load_flippers, save_flippers
 
 from common import *
 
@@ -58,21 +58,27 @@ def estop_monitor(nodes: List[CanSimpleNode], bus: can.BusABC, heartbeat: thread
                 node.call_estop()
 
 
-def error_monitor(nodes: List[CanSimpleNode], bus: can.BusABC) -> None:
+def msg_monitor(nodes: List[CanSimpleNode], flippers: Dict[Pos, Flipper], bus: can.BusABC) -> None:
     """Listens for node errors and triggers E-Stop if any occur."""
     while True:
         msg = bus.recv()
-        if msg and (msg.arbitration_id & 0x1F) == 0x01:
-            code = struct.unpack('<I', msg.data[:4])[0]
-            if code != 0:
+        if msg:
+            if (msg.arbitration_id & 0x1F) == 0x01:
+                code = struct.unpack('<I', msg.data[:4])[0]
+                if code != 0:
+                    nid = msg.arbitration_id >> 5
+                    print(f"[ERROR] Node {nid} error {code}: triggering E-Stop")
+                    for node in nodes:
+                        node.call_estop()
+                    break
+            elif (msg.arbitration_id & GET_ENCODER_ESTIMATES_CMD) == 0x01:
+                pos, vel = struct.unpack('<ff', msg.data)
                 nid = msg.arbitration_id >> 5
-                print(f"[ERROR] Node {nid} error {code}: triggering E-Stop")
-                for node in nodes:
-                    node.call_estop()
-                break
-
-def pos_monitor(flippers: Dict[Pos, Flipper]) -> None:
-    asyncio.run(asyncio.wait([f.read_async() for f in flippers.values()]))
+                for f in flippers.values():
+                    if f.node.node_id == nid:
+                        f._position = pos
+                        f._velocity = vel
+        
 
 def clamp(val:float, lo:float=-1.0, hi:float=1.0) -> float:
     return max(min(val, hi), lo)
@@ -179,12 +185,13 @@ def main():
         else:
             flipper.addInstruction(rearInstruction)
     load_flippers(flipper_devs)
-        
+    
+    posEvents: Dict[Pos, threading.Event] = {name: threading.Event() for name in flippers.keys()}
 
     heartbeat = threading.Event()
     if not mockFlippers:
         threading.Thread(target=estop_monitor, args=(all_nodes, bus, heartbeat), daemon=True).start()
-        threading.Thread(target=error_monitor, args=(all_nodes, bus), daemon=True).start()
+        threading.Thread(target=msg_monitor, args=(all_nodes, flipper_devs, posEvents, bus), daemon=True).start()
 
     for node in all_nodes:
         node.clear_errors_msg()
@@ -193,81 +200,80 @@ def main():
     drive_enabled = False
     error_cleared = False
 
-    try:
-        while True:
-            heartbeat.set()
-
-            # E-Stop: bumpers
-            if xbox.LeftBumper.state or xbox.RightBumper.state:
-                for node in all_nodes:
-                    node.call_estop()
-                drive_enabled = False
-
-            # Toggle drive enable: A button
-            if xbox.A.state and not drive_enabled:
-                for node in all_nodes:
-                    node.set_state_msg(CLOSED_LOOP_CONTROL)
-                drive_enabled = True
-            elif (not xbox.A.state or not xbox.Connected) and drive_enabled:
-                for node in all_nodes:
-                    node.set_state_msg(IDLE)
-                drive_enabled = False
-
-            # Clear errors: B button
-            if xbox.B.state and not error_cleared:
-                for node in all_nodes:
-                    node.clear_errors_msg()
-                error_cleared = True
-            elif not xbox.B.state:
-                error_cleared = False
-
-            pos_monitor(flipper_devs)
-            for f in flipper_devs.values():
-                f.update()
-            for f in flipper_devs.values():
-                f.run()
-                
-            if mockFlippers:
-                for f in flippers.values():
-                    f.update() # type: ignore
-                
-            if not mockFlippers:
-                handle_tracks(xbox, tracks, drive_enabled)
-            else:
-                print()
-                for name, flipper in flipper_devs.items():
-                    shortName = ''.join([n[0] for n in name.split('_')]).upper()
-                    values: Dict[str, float] = {
-                        '_p': flipper._position,
-                        '_s': flipper._setPosition,
-                        'P': flipper.position,
-                        'S': flipper.setPosition,
-                        '_v': flipper._velocity,
-                        '_z': flipper._zero,
-                    }
-                    fields = [f'{n}:{str(round(v, 3)).ljust(8)}' for n, v in values.items()]
-                    print(f'{shortName}: {"|".join(fields)}')
-
-            sleep(MAIN_LOOP_INTERVAL)
-
-    except KeyboardInterrupt:
-        print("[INFO] KeyboardInterrupt: E-Stopping all nodes.")
-        print("[WARNING] DO NOT FORCE KILL!!! SAVING FLIPPER POSITIONS IN 3 SECONDS!")
+    def onExit():
         if not mockFlippers:
             for node in all_nodes:
                 node.call_estop()
             sleep(3)
-            pos_monitor(flipper_devs)
+            for event in posEvents.values():
+                event.clear()
+            for name, event in posEvents.items():
+                if not event.wait(1.0):
+                    prompt_toolkit.print_formatted_text(f"<ansired>ERROR unable to save flipper {name}!</ansired>")
             save_flippers(flipper_devs)
+
+    try:
+        with OnExit(onExit):
+            while True:
+                heartbeat.set()
+
+                # E-Stop: bumpers
+                if xbox.LeftBumper.state or xbox.RightBumper.state:
+                    for node in all_nodes:
+                        node.call_estop()
+                    drive_enabled = False
+
+                # Toggle drive enable: A button
+                if xbox.A.state and not drive_enabled:
+                    for node in all_nodes:
+                        node.set_state_msg(CLOSED_LOOP_CONTROL)
+                    drive_enabled = True
+                elif (not xbox.A.state or not xbox.Connected) and drive_enabled:
+                    for node in all_nodes:
+                        node.set_state_msg(IDLE)
+                    drive_enabled = False
+
+                # Clear errors: B button
+                if xbox.B.state and not error_cleared:
+                    for node in all_nodes:
+                        node.clear_errors_msg()
+                    error_cleared = True
+                elif not xbox.B.state:
+                    error_cleared = False
+
+                for f in flipper_devs.values():
+                    f.update()
+                for f in flipper_devs.values():
+                    f.run()
+                    
+                if mockFlippers:
+                    for f in flippers.values():
+                        f.update() # type: ignore
+                    
+                if not mockFlippers:
+                    handle_tracks(xbox, tracks, drive_enabled)
+                else:
+                    print()
+                    for name, flipper in flipper_devs.items():
+                        shortName = ''.join([n[0] for n in name.split('_')]).upper()
+                        values: Dict[str, float] = {
+                            '_p': flipper._position,
+                            '_s': flipper._setPosition,
+                            'P': flipper.position,
+                            'S': flipper.setPosition,
+                            '_v': flipper._velocity,
+                            '_z': flipper._zero,
+                        }
+                        fields = [f'{n}:{str(round(v, 3)).ljust(8)}' for n, v in values.items()]
+                        print(f'{shortName}: {"|".join(fields)}')
+
+                sleep(MAIN_LOOP_INTERVAL)
+
+    except KeyboardInterrupt:
+        print("[INFO] KeyboardInterrupt: E-Stopping all nodes.")
 
     finally:
         if not mockFlippers:
-            print("[WARNING] DO NOT FORCE KILL!!! SAVING FLIPPER POSITIONS IN 3 SECONDS!")
-            for node in all_nodes:
-                node.set_state_msg(IDLE)
-            sleep(3)
-            pos_monitor(flipper_devs)
-            save_flippers(flipper_devs)
             bus.shutdown()
         print("Application exited")
 

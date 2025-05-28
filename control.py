@@ -4,7 +4,8 @@ import asyncio
 from datetime import datetime
 from pathlib import Path
 from statistics import mean
-from typing import Dict, Iterable, Optional, Sequence, Tuple
+from typing import Callable, Dict, Generic, Iterable, Optional, Sequence, Tuple, TypeAlias
+import typing
 import can
 from typing_extensions import override
 from can_simple_utils import CanSimpleNode
@@ -262,13 +263,13 @@ class PairInstruction(Instruction):
         self.controller = controller
         self.pair: Pair = pair
         self.setOffset = 0.0
+        self.offset = 0.0
         
         self.active = StateBool()
         self.convergeControl = StateBool()
         
-    @property
-    def offset(self) -> float:
-        return mean([f.position - (f.setPosition - self.setOffset) for f in self.flippers])
+    def update(self):
+        self.offset = mean([f.position - (f.setPosition - self.setOffset) for f in self.flippers])
         
     def command(self) -> float:
         # Is the corresponding pair selected
@@ -306,12 +307,12 @@ class AllInstruction(Instruction):
         super().__init__()
         self.controller = controller
         self.setOffset = 0.0
+        self.offset = 0.0
         
         self.active = StateBool()
     
-    @property
-    def offset(self) -> float:
-        return mean([f.position - (f.setPosition - self.setOffset) for f in self.flippers])
+    def update(self):
+        self.offset = mean([f.position - (f.setPosition - self.setOffset) for f in self.flippers])
     
     def command(self) -> float:
         self.active.state = (self.controller.A.state and not 
@@ -364,9 +365,6 @@ class Flipper:
     def run(self):
         self.setPosition = sum([i.command() for i in self.instructions])
         
-    async def read_async(self):
-        self._position, self._velocity = await self.node.get_encoder_estimates()
-        
     def zero(self):
         self._zero = self._position
         
@@ -396,3 +394,16 @@ def save_flippers(flippers: Dict[str, Flipper]):
         
     with FLIPPER_OFFSETS_PATH.open('w') as wr:
         dump(data, wr)
+        wr.flush() # Just as a safety measure
+
+class OnExit():
+    def __init__(self, func:Callable[..., None], *args, **kwargs):
+        self.func = func
+        self.args = args
+        self.kwargs = kwargs
+        
+    def __enter__(self) -> OnExit:
+        return self
+    
+    def __exit__(self, _, __, ___):
+        self.func(*self.args, **self.kwargs)
