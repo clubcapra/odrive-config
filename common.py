@@ -2,7 +2,6 @@
 from pathlib import Path
 from typing import Dict, List, Literal, Union
 
-
 CLOSED_LOOP_CONTROL = 8
 IDLE = 1
 

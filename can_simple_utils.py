@@ -1,24 +1,30 @@
 from __future__ import annotations
 # 100% from https://github.com/odriverobotics/ODriveResources/blob/master/examples/can_simple_utils.py
 import asyncio
+from enum import Enum
 import can
 import struct
 
 from typing import Tuple
+from common import IDLE
 from odrive_error_codes import get_error_description
+
+
+ESTOP_CMD = 0x002
+HEARTBEAT_CMD = 0x001
+GET_ERROR_CMD = 0x003
 
 ADDRESS_CMD = 0x06
 SET_AXIS_STATE_CMD = 0x07
 REBOOT_CMD = 0x16
 CLEAR_ERRORS_CMD = 0x18
 SET_INPUT_POS_CMD = 0x0C  # Set_Input_Pos command ID
-
-# Newly added CANSimple Get_... command IDs
 GET_ENCODER_ESTIMATES_CMD = 0x09
 GET_TEMPERATURE_CMD = 0x15
 GET_BUS_VOLTAGE_CURRENT_CMD = 0x17
 GET_POWERS_CMD = 0x1D
 GET_TORQUES_CMD = 0x1C
+    
 
 REBOOT_ACTION_REBOOT = 0
 REBOOT_ACTION_SAVE = 1
@@ -30,6 +36,16 @@ class CanSimpleNode():
         self.node_id: int = node_id
         self.reader: can.AsyncBufferedReader = can.AsyncBufferedReader()
         self.connected: bool = False
+        self.position = 0.0
+        self.velocity = 0.0
+        self.torque = 0.0
+        self.error = 0
+        self.disarmReason = 0
+        self.state = IDLE
+        self.current = 0.0
+        self.voltage = 0.0
+        self.fetTemperature = 0.0
+        self.motorTemperature = 0.0
 
     def __enter__(self) -> CanSimpleNode:
         self.notifier = can.Notifier(
@@ -50,6 +66,30 @@ class CanSimpleNode():
                 if msg.arbitration_id == ((self.node_id << 5) | cmd_id):
                     return msg
         return asyncio.wait_for(_impl(), timeout)
+    
+    def read_msg(self, msg: can.Message):
+        nid = ((msg.arbitration_id & (0b11111 << 5)) >> 5)
+        if nid != self.node_id:
+            return
+        cmd_id = msg.arbitration_id & 0b11111
+        if cmd_id == GET_ENCODER_ESTIMATES_CMD:
+            self.position, self.velocity = struct.unpack('<ff', msg.data)
+            # print(f'{nid} {self.node_id}: pos:{self.position} vel:{self.velocity}')
+        elif cmd_id == GET_BUS_VOLTAGE_CURRENT_CMD:
+            self.voltage, self.current = struct.unpack('<ff', msg.data)
+        elif cmd_id == GET_TEMPERATURE_CMD:
+            self.fetTemperature, self.motorTemperature = struct.unpack('<ff', msg.data)
+        elif cmd_id == GET_BUS_VOLTAGE_CURRENT_CMD:
+            self.voltage, self.current = struct.unpack('<ff', msg.data)
+        elif cmd_id == GET_TORQUES_CMD:
+            _, self.torque = struct.unpack('<ff', msg.data)
+        elif cmd_id == GET_ERROR_CMD:
+            self.error, self.disarmReason = struct.unpack('<II', msg.data)
+            if self.error != 0:
+                self.getErrorDescription(self.error)
+        elif cmd_id == HEARTBEAT_CMD:
+            errOrDisarmReason, self.state, procedureDone, trajDone = struct.unpack('<IBBBx', msg.data)
+
 
     def clear_errors_msg(self, identify: bool = False) -> None:
         data = b'\x01' if identify else b'\x00'
